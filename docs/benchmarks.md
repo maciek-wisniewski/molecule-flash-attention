@@ -12,6 +12,9 @@ Every method computes the same function from the same terms, except the last row
 | `flex` | PyTorch FlexAttention (`torch.compile`d), the terms translated to `score_mod` and `mask_mod` | no |
 | `flashbias` | FlashBias (Wu et al., NeurIPS 2025), low-rank factors appended to q and k; exact only for the `lowrank` scenario | no |
 | `cuequivariance` | NVIDIA cuEquivariance 0.13.0 `attention_pair_bias`, bias precomputed densely; includes the op's own projections and gate | yes |
+| `xformers` | xformers 0.0.35 `memory_efficient_attention` (cutlass) with the dense bias as a tensor | yes |
+| `ds4sci` | DeepSpeed `DS4Sci_EvoformerAttention` (CUTLASS) with the dense bias; float16 and bfloat16 only | yes |
+| `turbopairformer` | TurboPairFormer triangle-attention kernel with the dense bias; Hopper GPUs and bfloat16 only | yes |
 | `sdpa+bias` | dense bias built in PyTorch, passed to `F.scaled_dot_product_attention` as a float mask | yes |
 | `eager` | plain PyTorch, every `[B, H, N, N]` tensor explicit | yes |
 | `sdpa (no bias)` | SDPA without any bias (FlashAttention-2 backend) | no |
@@ -41,6 +44,8 @@ Forward plus backward time and peak memory per attention layer. OOM: out of memo
 | complex | flex | 9312.2 ms, 10.64 GB | OOM | OOM |
 | complex | flashbias | n/a | n/a | n/a |
 | complex | cuequivariance | 1061.2 ms, 9.72 GB | OOM | OOM |
+| complex | xformers | 1057.0 ms, 9.68 GB | OOM | OOM |
+| complex | ds4sci | 1109.9 ms, 9.94 GB | OOM | OOM |
 | complex | sdpa+bias | 1057.1 ms, 9.69 GB | OOM | OOM |
 | complex | eager | 1069.8 ms, 10.48 GB | OOM | OOM |
 | complex | sdpa (no bias) | 0.9 ms, 0.08 GB | 11.5 ms, 0.24 GB | 43.8 ms, 0.44 GB |
@@ -48,6 +53,8 @@ Forward plus backward time and peak memory per attention layer. OOM: out of memo
 | lowrank | flex | 2396.1 ms, 9.86 GB | OOM | OOM |
 | lowrank | flashbias | 3.4 ms, 0.07 GB | 45.0 ms, 0.23 GB | 189.2 ms, 0.44 GB |
 | lowrank | cuequivariance | 20.0 ms, 1.84 GB | 286.7 ms, 28.50 GB | OOM |
+| lowrank | xformers | 14.2 ms, 1.80 GB | 203.1 ms, 28.35 GB | OOM |
+| lowrank | ds4sci | 70.4 ms, 2.11 GB | 1089.9 ms, 32.76 GB | OOM |
 | lowrank | sdpa+bias | 14.0 ms, 1.80 GB | 202.6 ms, 28.35 GB | OOM |
 | lowrank | eager | 27.5 ms, 3.62 GB | OOM | OOM |
 | lowrank | sdpa (no bias) | 0.9 ms, 0.07 GB | 11.6 ms, 0.22 GB | 44.5 ms, 0.43 GB |
@@ -55,6 +62,8 @@ Forward plus backward time and peak memory per attention layer. OOM: out of memo
 | molecule | flex | 115.6 ms, 0.07 GB | 4061.9 ms, 0.18 GB | 18718.1 ms, 0.33 GB |
 | molecule | flashbias | n/a | n/a | n/a |
 | molecule | cuequivariance | 491.1 ms, 9.45 GB | OOM | OOM |
+| molecule | xformers | 486.2 ms, 9.38 GB | OOM | OOM |
+| molecule | ds4sci | 538.6 ms, 9.64 GB | OOM | OOM |
 | molecule | sdpa+bias | 485.1 ms, 9.40 GB | OOM | OOM |
 | molecule | eager | 498.9 ms, 10.19 GB | OOM | OOM |
 | molecule | sdpa (no bias) | 0.9 ms, 0.08 GB | 11.5 ms, 0.23 GB | 43.6 ms, 0.44 GB |
@@ -62,6 +71,8 @@ Forward plus backward time and peak memory per attention layer. OOM: out of memo
 | protein | flex | 167.2 ms, 0.23 GB | 1500.5 ms, 3.10 GB | 3578.8 ms, 12.18 GB |
 | protein | flashbias | n/a | n/a | n/a |
 | protein | cuequivariance | 745.4 ms, 9.72 GB | OOM | OOM |
+| protein | xformers | 741.8 ms, 9.66 GB | OOM | OOM |
+| protein | ds4sci | 794.0 ms, 9.92 GB | OOM | OOM |
 | protein | sdpa+bias | 743.2 ms, 9.69 GB | OOM | OOM |
 | protein | eager | 755.6 ms, 10.48 GB | OOM | OOM |
 | protein | sdpa (no bias) | 0.9 ms, 0.08 GB | 11.5 ms, 0.23 GB | 44.0 ms, 0.44 GB |
@@ -72,6 +83,7 @@ Notes on the baselines:
 
 - FlexAttention computes the same function and agrees with the reference (see Accuracy). It cannot differentiate through two reads of one captured tensor, so the baseline passes interpolation tables as separate value and slope tensors and edge values as one tensor per slot. A `mask_mod` with captured tensors failed in the compiled backward on this PyTorch version (2.14), so the mask is applied in `score_mod` and the block mask only skips empty blocks.
 - FlashBias needs all eight arguments of `flash_bias_func` passed explicitly; with the defaults its backward fails on an index error. On the A100 its output agrees with the reference (largest relative error 3.9e-3 in bfloat16, as for molflash). On the H100 and H200 it deviated by 6 to 11% in our runs; its authors describe the Triton kernel as tested on A100 only, so the Hopper FlashBias timings below are of a kernel that does not compute the intended result.
+- xformers, DS4Sci and TurboPairFormer pin older PyTorch versions (2.10) and run in separate environments; they receive the same dense bias as SDPA. DS4Sci turns `-inf` in the bias into NaN, so masked pairs get -30,000 instead, which removes them equally.
 - cuEquivariance `attention_pair_bias` projects its own queries, keys, values and output gate from a single representation, so its time includes those projections and its output is a different function. Its bias input is the dense `[B, H, N, N]` tensor, so its memory grows as N².
 
 ### H100
@@ -84,6 +96,9 @@ NVIDIA H100 PCIe (80 GB). Same layout as the A100 table.
 | complex | flex | 8301.9 ms, 10.68 GB | > 30 s | > 30 s |
 | complex | flashbias | n/a | n/a | n/a |
 | complex | cuequivariance | 881.8 ms, 9.77 GB | OOM | OOM |
+| complex | xformers | 897.2 ms, 9.73 GB | OOM | OOM |
+| complex | ds4sci | 934.0 ms, 9.74 GB | OOM | OOM |
+| complex | turbopairformer | 899.9 ms, 9.73 GB | OOM | OOM |
 | complex | sdpa+bias | 877.6 ms, 9.73 GB | OOM | OOM |
 | complex | eager | 882.4 ms, 10.52 GB | OOM | OOM |
 | complex | sdpa (no bias) | 0.5 ms, 0.11 GB | 5.6 ms, 0.24 GB | 24.9 ms, 0.42 GB |
@@ -91,6 +106,9 @@ NVIDIA H100 PCIe (80 GB). Same layout as the A100 table.
 | lowrank | flex | 1968.4 ms, 9.90 GB | OOM | OOM |
 | lowrank | flashbias | 1.7 ms, 0.12 GB | 21.6 ms, 0.28 GB | 88.5 ms, 0.50 GB |
 | lowrank | cuequivariance | 12.0 ms, 1.89 GB | 188.8 ms, 28.55 GB | OOM |
+| lowrank | xformers | 8.3 ms, 1.85 GB | 130.4 ms, 28.40 GB | OOM |
+| lowrank | ds4sci | 45.1 ms, 1.86 GB | 742.2 ms, 28.45 GB | OOM |
+| lowrank | turbopairformer | 11.4 ms, 1.85 GB | 183.5 ms, 28.42 GB | OOM |
 | lowrank | sdpa+bias | 8.4 ms, 1.86 GB | 130.0 ms, 28.41 GB | OOM |
 | lowrank | eager | 13.9 ms, 3.68 GB | 227.9 ms, 56.87 GB | OOM |
 | lowrank | sdpa (no bias) | 0.5 ms, 0.11 GB | 5.6 ms, 0.24 GB | 24.7 ms, 0.42 GB |
@@ -98,6 +116,9 @@ NVIDIA H100 PCIe (80 GB). Same layout as the A100 table.
 | molecule | flex | 96.9 ms, 0.12 GB | 3324.9 ms, 0.23 GB | 15123.2 ms, 0.38 GB |
 | molecule | flashbias | n/a | n/a | n/a |
 | molecule | cuequivariance | 405.3 ms, 9.49 GB | OOM | OOM |
+| molecule | xformers | 413.1 ms, 9.38 GB | OOM | OOM |
+| molecule | ds4sci | 450.5 ms, 9.39 GB | OOM | OOM |
+| molecule | turbopairformer | 416.2 ms, 9.38 GB | OOM | OOM |
 | molecule | sdpa+bias | 401.7 ms, 9.46 GB | OOM | OOM |
 | molecule | eager | 407.0 ms, 10.25 GB | OOM | OOM |
 | molecule | sdpa (no bias) | 0.5 ms, 0.12 GB | 5.3 ms, 0.25 GB | 24.5 ms, 0.43 GB |
@@ -105,6 +126,9 @@ NVIDIA H100 PCIe (80 GB). Same layout as the A100 table.
 | protein | flex | 75.7 ms, 0.27 GB | 905.9 ms, 3.15 GB | 2477.0 ms, 12.23 GB |
 | protein | flashbias | n/a | n/a | n/a |
 | protein | cuequivariance | 615.3 ms, 9.76 GB | OOM | OOM |
+| protein | xformers | 630.5 ms, 9.66 GB | OOM | OOM |
+| protein | ds4sci | 667.4 ms, 9.67 GB | OOM | OOM |
+| protein | turbopairformer | 633.3 ms, 9.66 GB | OOM | OOM |
 | protein | sdpa+bias | 611.2 ms, 9.73 GB | OOM | OOM |
 | protein | eager | 615.7 ms, 10.52 GB | OOM | OOM |
 | protein | sdpa (no bias) | 0.5 ms, 0.11 GB | 5.5 ms, 0.24 GB | 24.7 ms, 0.42 GB |
