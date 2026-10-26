@@ -143,6 +143,7 @@ NVIDIA H200 (141 GB). Same layout as the A100 table.
 | complex | flex | 7031.1 ms, 10.68 GB | OOM | OOM |
 | complex | flashbias | n/a | n/a | n/a |
 | complex | cuequivariance | 811.1 ms, 9.77 GB | OOM | OOM |
+| complex | turbopairformer | 811.9 ms, 9.73 GB | OOM | OOM |
 | complex | sdpa+bias | 809.5 ms, 9.73 GB | OOM | OOM |
 | complex | eager | 812.0 ms, 10.52 GB | OOM | OOM |
 | complex | sdpa (no bias) | 0.3 ms, 0.11 GB | 4.0 ms, 0.24 GB | 16.7 ms, 0.42 GB |
@@ -150,6 +151,7 @@ NVIDIA H200 (141 GB). Same layout as the A100 table.
 | lowrank | flex | 1310.6 ms, 9.90 GB | n/a | n/a |
 | lowrank | flashbias | 0.9 ms, 0.12 GB | 15.2 ms, 0.28 GB | 62.5 ms, 0.50 GB |
 | lowrank | cuequivariance | 6.9 ms, 1.89 GB | 97.1 ms, 28.55 GB | OOM |
+| lowrank | turbopairformer | 6.8 ms, 1.85 GB | 109.9 ms, 28.42 GB | 424.3 ms, 113.27 GB |
 | lowrank | sdpa+bias | 5.1 ms, 1.86 GB | 74.0 ms, 28.41 GB | 273.9 ms, 113.24 GB |
 | lowrank | eager | 8.0 ms, 3.68 GB | 127.7 ms, 56.87 GB | OOM |
 | lowrank | sdpa (no bias) | 0.3 ms, 0.11 GB | 4.0 ms, 0.24 GB | 16.9 ms, 0.42 GB |
@@ -157,6 +159,7 @@ NVIDIA H200 (141 GB). Same layout as the A100 table.
 | molecule | flex | 79.8 ms, 0.12 GB | 2807.6 ms, 0.23 GB | 13638.8 ms, 0.38 GB |
 | molecule | flashbias | n/a | n/a | n/a |
 | molecule | cuequivariance | 369.3 ms, 9.49 GB | OOM | OOM |
+| molecule | turbopairformer | 369.8 ms, 9.38 GB | OOM | OOM |
 | molecule | sdpa+bias | 367.8 ms, 9.46 GB | OOM | OOM |
 | molecule | eager | 370.9 ms, 10.25 GB | OOM | OOM |
 | molecule | sdpa (no bias) | 0.3 ms, 0.12 GB | 4.0 ms, 0.25 GB | 16.1 ms, 0.43 GB |
@@ -164,6 +167,7 @@ NVIDIA H200 (141 GB). Same layout as the A100 table.
 | protein | flex | 74.2 ms, 0.27 GB | 737.5 ms, 3.15 GB | 2186.1 ms, 12.23 GB |
 | protein | flashbias | n/a | n/a | n/a |
 | protein | cuequivariance | 569.5 ms, 9.76 GB | OOM | OOM |
+| protein | turbopairformer | 570.2 ms, 9.66 GB | OOM | OOM |
 | protein | sdpa+bias | 567.7 ms, 9.73 GB | OOM | OOM |
 | protein | eager | 569.9 ms, 10.52 GB | OOM | OOM |
 | protein | sdpa (no bias) | 0.3 ms, 0.11 GB | 4.0 ms, 0.24 GB | 16.7 ms, 0.41 GB |
