@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "molecule-flash-attention: Dynamic Molecular Graph Flash Attention"
+authors:
+  - family-names: "Wiśniewski"
+    given-names: "Maciej"
+    email: "m.wisniewski@datascience.edu.pl"
+    affiliation: "SFGLab, Warsaw University of Technology"
+license: Apache-2.0
+repository-code: "https://github.com/maciek-wisniewski/molecule-flash-attention"
+version: "0.1.0"
+date-released: "2026-11-04"

@@ -1,0 +1,12 @@
+[general]
+name = "molflash"
+version = 1
+edition = 6
+license = "Apache-2.0"
+# Pure Triton; only CUDA is tested.
+backends = ["cuda"]
+
+[general.hub]
+repo-id = "maciek-wisniewski/molflash"
+
+[torch-noarch]

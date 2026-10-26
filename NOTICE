@@ -1,0 +1,6 @@
+molecule-flash-attention
+Copyright 2026 Maciej Wiśniewski, SFGLab, Warsaw University of Technology
+
+The tiled flash-attention structure of the kernels follows the fused attention tutorial of
+OpenAI Triton (https://github.com/triton-lang/triton, python/tutorials/06-fused-attention.py),
+Copyright 2018-2020 Philippe Tillet, Copyright 2020-2022 OpenAI, MIT License.
