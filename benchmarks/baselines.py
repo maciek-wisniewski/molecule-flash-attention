@@ -255,12 +255,48 @@ def cuequivariance(q, k, v, kw):
     return out.view(b, n, h, d).transpose(1, 2)
 
 
+def xformers(q, k, v, kw):
+    """xformers memory_efficient_attention (cutlass) with the dense bias as a tensor."""
+    import xformers.ops as xops
+
+    bias = _dense_bias(q, k, kw, q.dtype)
+    o = xops.memory_efficient_attention(
+        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_bias=bias
+    )
+    return o.transpose(1, 2)
+
+
+def ds4sci(q, k, v, kw):
+    """DeepSpeed DS4Sci_EvoformerAttention (CUTLASS), sequence axis of size 1, dense pair bias."""
+    from deepspeed.ops.deepspeed4science import DS4Sci_EvoformerAttention
+
+    b, h, n, _ = q.shape
+    # The kernel turns -inf in the bias into NaN; a large finite value masks the same pairs.
+    bias = _dense_bias(q, k, kw, q.dtype).clamp(min=-3.0e4).unsqueeze(1)  # [B, 1, H, N, N]
+    qq, kk, vv = (x.transpose(1, 2).unsqueeze(1) for x in (q, k, v))  # [B, 1, N, H, D]
+    o = DS4Sci_EvoformerAttention(qq, kk, vv, [None, bias])
+    return o.squeeze(1).transpose(1, 2)
+
+
+def turbopairformer(q, k, v, kw):
+    """TurboPairFormer triangle-attention kernel (Hopper only) with a dense pair bias."""
+    from turbopairformer import turbo_attention
+
+    bias = _dense_bias(q, k, kw, torch.bfloat16).unsqueeze(0)  # [B, 1, H, N, N]
+    qq, kk, vv = (x.unsqueeze(1) for x in (q, k, v))  # [B, 1, H, N, D]
+    o = turbo_attention(qq, kk, vv, pair_bias=bias)  # [B, 1, N, H, D]
+    return o.squeeze(1).transpose(1, 2)
+
+
 METHODS = {
     "molflash": molflash,
     "flex": flex,
     "sdpa+bias": sdpa_bias,
     "flashbias": flashbias,
     "cuequivariance": cuequivariance,
+    "xformers": xformers,
+    "ds4sci": ds4sci,
+    "turbopairformer": turbopairformer,
     "eager": eager,
     "sdpa (no bias)": sdpa_plain,
 }

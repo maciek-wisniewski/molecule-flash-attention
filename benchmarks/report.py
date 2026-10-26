@@ -8,7 +8,18 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-ORDER = ["molflash", "flex", "flashbias", "cuequivariance", "sdpa+bias", "eager", "sdpa (no bias)"]
+ORDER = [
+    "molflash",
+    "flex",
+    "flashbias",
+    "cuequivariance",
+    "xformers",
+    "ds4sci",
+    "turbopairformer",
+    "sdpa+bias",
+    "eager",
+    "sdpa (no bias)",
+]
 
 
 def _load(paths):
