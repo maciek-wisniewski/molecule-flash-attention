@@ -14,6 +14,13 @@ pip install git+https://github.com/maciek-wisniewski/molecule-flash-attention
 
 Requires PyTorch 2.14 or newer and an NVIDIA GPU. The package is pure Python and Triton, with nothing to compile.
 
+It is also published as a Hugging Face kernel:
+
+```
+from kernels import get_kernel
+mf = get_kernel("SFGLab/molflash", version=1, trust_remote_code=True)
+```
+
 ## Example
 
 ```python
