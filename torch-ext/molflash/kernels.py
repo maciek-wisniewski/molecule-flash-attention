@@ -542,6 +542,7 @@ def _gen_fwd(src: _Source) -> str:
         + _tensor_params("V", 4)
         + _tensor_params("O", 4)
         + _tensor_params("LSE", 3)
+        + _tensor_params("MAXS", 3)
         + src.term_params(grads=False)
         + ["H", "NQ", "NK", "SCALE"]
     )
@@ -608,6 +609,12 @@ def _gen_fwd(src: _Source) -> str:
             "* O_s3, out.to(O.dtype.element_ty), mask=m_valid[:, None] & (offs_dv[None, :] < DV))",
             "tl.store(LSE + off_b * LSE_s0 + off_h * LSE_s1 + q_tok * LSE_s2, "
             "m_safe + tl.log(l_safe), mask=m_valid)",
+            # The largest score this row saw, before the softmax. `m_i` carries it
+            # already -- the online softmax subtracts it for stability -- so this is a
+            # store and no arithmetic: one float per query row, never per pair. A row
+            # with no key left keeps the 0.0 that `m_safe` substitutes for -inf.
+            "tl.store(MAXS + off_b * MAXS_s0 + off_h * MAXS_s1 + q_tok * MAXS_s2, "
+            "m_safe, mask=m_valid)",
         )
     return L.text()
 
@@ -1065,11 +1072,13 @@ def forward(
         total = q.shape[0]
         o = torch.empty((total, st.heads, st.dv), device=q.device, dtype=q.dtype)
         lse = torch.empty((1, st.heads, total), device=q.device, dtype=torch.float32)
+        mx = torch.empty((1, st.heads, total), device=q.device, dtype=torch.float32)
     else:
         batch, _, nq, _ = q.shape
         nk = k.shape[2]
         o = torch.empty((*q.shape[:3], st.dv), device=q.device, dtype=q.dtype)
         lse = torch.empty((batch, st.heads, nq), device=q.device, dtype=torch.float32)
+        mx = torch.empty((batch, st.heads, nq), device=q.device, dtype=torch.float32)
     o4 = _qkv4(o, varlen)
     launch = Launch(st, tensors, slots, pair_slots, batch, nq, nk)
     launch.cu_q, launch.cu_k = cu_q, cu_k
@@ -1081,12 +1090,13 @@ def forward(
         + _t_args(v4, 4, zb)
         + _t_args(o4, 4, zb)
         + _t_args(lse, 3, zb)
+        + _t_args(mx, 3, zb)
         + launch.term_args(None)
         + [st.heads, nq, nk, scale]
     )
     grid = (triton.cdiv(max(nq, 1), bm), batch * st.heads)
     fwd[grid](*args, **launch.constexpr(bm, bn), num_warps=warps, num_stages=stages)
-    return o, lse
+    return o, lse, mx
 
 
 def backward(

@@ -162,7 +162,8 @@ def attention(
     gate=None,
     key_mask: torch.Tensor | None = None,
     softmax_scale: float | None = None,
-) -> torch.Tensor:
+    return_max_score: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Same arguments and result as :func:`molflash.attention`, computed densely in float32."""
     b, h, nq, d = q.shape
     nk = k.shape[2]
@@ -181,11 +182,17 @@ def attention(
         keep = keep & dense_term(term, b, h, nq, nk)
 
     s = torch.where(keep, s, torch.full_like(s, _FILL))
+    # Before the softmax, and 0.0 for a row with nothing left, which is what the
+    # kernel's `m_safe` substitutes for -inf.
+    alive = keep.any(dim=-1, keepdim=True)
+    max_score = torch.where(alive, s.max(dim=-1, keepdim=True).values, torch.zeros_like(s[..., :1])).squeeze(-1)
+    max_score = max_score.expand(b, h, nq).contiguous()
     p = torch.softmax(s, dim=-1)
     p = torch.where(keep, p, torch.zeros_like(p))
     for term in _listify(gate):
         p = p * dense_term(term, b, h, nq, nk)
-    return (p @ v.float()).to(q.dtype)
+    out = (p @ v.float()).to(q.dtype)
+    return (out, max_score) if return_max_score else out
 
 
 def attention_varlen(

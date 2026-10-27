@@ -45,7 +45,7 @@ def _fwd(
     cu_k: torch.Tensor | None,
     max_q: int,
     max_k: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     st, slots, pair_slots = lookup(key)
     return kernels.forward(st, q, k, v, tensors, slots, pair_slots, scale, cu_q, cu_k, max_q, max_k)
 
@@ -56,10 +56,12 @@ def _(q, k, v, tensors, key, scale, cu_q, cu_k, max_q, max_k):
     if st.varlen:
         o = q.new_empty((q.shape[0], q.shape[1], v.shape[-1]))
         lse = q.new_empty((1, q.shape[1], q.shape[0]), dtype=torch.float32)
+        mx = q.new_empty((1, q.shape[1], q.shape[0]), dtype=torch.float32)
     else:
         o = q.new_empty((*q.shape[:3], v.shape[-1]))
         lse = q.new_empty(q.shape[:3], dtype=torch.float32)
-    return o, lse
+        mx = q.new_empty(q.shape[:3], dtype=torch.float32)
+    return o, lse, mx
 
 
 @torch.library.custom_op(add_op_namespace_prefix("bwd"), mutates_args=())
@@ -109,16 +111,16 @@ def _(q, k, v, o, lse, do, tensors, key, scale, cu_q, cu_k, max_q, max_k):
 
 def _setup_context(ctx, inputs, output):
     q, k, v, tensors, key, scale, cu_q, cu_k, max_q, max_k = inputs
-    o, lse = output
+    o, lse, mx = output
     ctx.save_for_backward(q, k, v, o, lse, *tensors)
     ctx.meta = (key, scale, cu_q, cu_k, max_q, max_k)
-    ctx.mark_non_differentiable(lse)
+    ctx.mark_non_differentiable(lse, mx)
 
 
 _UNSUPPORTED = "is not implemented yet; see docs/guide.md#not-supported-yet"
 
 
-def _backward(ctx, do, _dlse):
+def _backward(ctx, do, _dlse, _dmax):
     if torch.is_grad_enabled():
         raise NotImplementedError(
             f"molflash: the gradient of the gradient (create_graph=True) {_UNSUPPORTED}"
@@ -164,7 +166,8 @@ def attention(
     gate=None,
     key_mask: torch.Tensor | None = None,
     softmax_scale: float | None = None,
-) -> torch.Tensor:
+    return_max_score: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Attention with structural terms computed in the kernel.
 
     Args:
@@ -176,6 +179,11 @@ def attention(
         gate: ``PairGate`` terms, multiplying the probabilities after the softmax.
         key_mask: ``[B, Nk]`` bool, ``False`` for padding.
         softmax_scale: defaults to ``D ** -0.5``.
+        return_max_score: also return the largest pre-softmax score of every query
+            row, ``[B, H, Nq]`` float32. The kernel tracks it anyway, so this costs
+            one store per row and no arithmetic -- there is no other way to see it,
+            because a score tile never leaves the kernel. Rows with no key left read
+            0.0. Not differentiable.
 
     Returns ``[B, H, Nq, Dv]``. Queries with no key left return zeros.
     """
@@ -188,14 +196,14 @@ def attention(
     plan = build_plan(q, k, v, terms, key_mask, varlen=False)
     _reject_transforms([q, k, v, *plan.tensors])
     key = register(plan.desc)
-    o, _ = _fwd(q, k, v, plan.tensors, key, scale, None, None, 0, 0)
+    o, _, max_score = _fwd(q, k, v, plan.tensors, key, scale, None, None, 0, 0)
     if checking:
         groups = {
             n: _listify(g)
             for n, g in dict(bias=bias, mask=mask, multiplier=multiplier, gate=gate).items()
         }
         checks.compare_rows(o, q, k, v, groups, key_mask, scale)
-    return o
+    return (o, max_score) if return_max_score else o
 
 
 def attention_varlen(
@@ -212,7 +220,8 @@ def attention_varlen(
     multiplier=None,
     gate=None,
     softmax_scale: float | None = None,
-) -> torch.Tensor:
+    return_max_score: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """:func:`attention` on sequences packed without padding.
 
     ``q`` is ``[Tq, H, D]``, ``k`` and ``v`` are ``[Tk, H, D]``; sequence ``i`` occupies rows
@@ -234,5 +243,7 @@ def attention_varlen(
     plan = build_plan(q, k, v, terms, None, varlen=True)
     _reject_transforms([q, k, v, *plan.tensors])
     key = register(plan.desc)
-    o, _ = _fwd(q, k, v, plan.tensors, key, scale, cu_q, cu_k, int(max_seqlen_q), int(max_seqlen_k))
-    return o
+    o, _, max_score = _fwd(
+        q, k, v, plan.tensors, key, scale, cu_q, cu_k, int(max_seqlen_q), int(max_seqlen_k)
+    )
+    return (o, max_score) if return_max_score else o
