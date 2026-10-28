@@ -218,37 +218,87 @@ class _Source:
 
     # -- per-term code -----------------------------------------------------------------------
 
+    def _side_loads(
+        self, L: _Lines | None, o: _Orient, p: int, spec: PairSpec, side: str
+    ) -> list[str]:
+        """The names of one side's channel values, emitting their loads when ``L`` is given."""
+        chans = spec.q_channels if side == "q" else spec.k_channels
+        floats = spec.q_float if side == "q" else spec.k_float
+        tok, valid = ("q_tok", "m_valid") if side == "q" else ("k_tok", "n_valid")
+        lay = o.q if side == "q" else o.k
+        names, i = [], 0
+        for f, (c_n, is_f) in enumerate(zip(chans, floats, strict=True)):
+            other = "0.0" if is_f else "0"
+            for c in range(c_n):
+                n = f"P{side.upper()}{p}_{f}"
+                if L is not None:
+                    L(
+                        f"x{side}{p}_{i} = "
+                        + lay(
+                            f"tl.load({n} + off_b * {n}_s0 + {tok} * {n}_s1 + {c} * {n}_s2, "
+                            f"mask={valid}, other={other})"
+                        )
+                    )
+                names.append(f"x{side}{p}_{i}")
+                i += 1
+        return names
+
+    def hoist(self, L: _Lines, o: _Orient) -> None:
+        """The tile loop walks one axis, so every feature on the other axis is loop invariant.
+
+        Emitting those loads once before the loop rather than letting the compiler lift them is
+        what makes the saving certain: the backward kernels write through pointers the compiler
+        cannot prove disjoint from these, so it keeps the loads inside.
+        """
+        side = "q" if o.name == "qk" else "k"
+        for p, spec in enumerate(self.st.pairs):
+            self._side_loads(L, o, p, spec, side)
+        if self.st.edge_slots and o.name == "qk":
+            self._edge_loads(L)
+        if self.st.edge_mask_slots and o.name == "qk":
+            self._emask_loads(L)
+
     def _channel_loads(self, L: _Lines, o: _Orient, p: int, spec: PairSpec) -> tuple[list, list]:
-        qs, ks = [], []
-        i = 0
-        for f, (c_n, is_f) in enumerate(zip(spec.q_channels, spec.q_float, strict=True)):
-            other = "0.0" if is_f else "0"
-            for c in range(c_n):
-                n = f"PQ{p}_{f}"
-                L(
-                    f"xq{p}_{i} = "
-                    + o.q(
-                        f"tl.load({n} + off_b * {n}_s0 + q_tok * {n}_s1 + {c} * {n}_s2, "
-                        f"mask=m_valid, other={other})"
-                    )
-                )
-                qs.append(f"xq{p}_{i}")
-                i += 1
-        i = 0
-        for f, (c_n, is_f) in enumerate(zip(spec.k_channels, spec.k_float, strict=True)):
-            other = "0.0" if is_f else "0"
-            for c in range(c_n):
-                n = f"PK{p}_{f}"
-                L(
-                    f"xk{p}_{i} = "
-                    + o.k(
-                        f"tl.load({n} + off_b * {n}_s0 + k_tok * {n}_s1 + {c} * {n}_s2, "
-                        f"mask=n_valid, other={other})"
-                    )
-                )
-                ks.append(f"xk{p}_{i}")
-                i += 1
+        """The loop-variant side's loads; the other side came from :meth:`hoist`."""
+        inv = "q" if o.name == "qk" else "k"
+        qs = self._side_loads(None if inv == "q" else L, o, p, spec, "q")
+        ks = self._side_loads(None if inv == "k" else L, o, p, spec, "k")
         return qs, ks
+
+    def _edge_loads(self, L: _Lines) -> None:
+        """One ``ei``/``ev`` pair per slot, unrolled here rather than by ``tl.static_range``."""
+        for es in range(self.st.edge_slots):
+            L(
+                f"ei{es} = tl.load(EI + off_b * EI_s0 + q_tok * EI_s1 + {es} * EI_s2, "
+                "mask=m_valid, other=-1)",
+                f"ev{es} = tl.load(EV + off_b * EV_s0 + q_tok * EV_s1 + {es} * EV_s2 "
+                "+ off_h * EV_s3, mask=m_valid, other=0.0).to(tl.float32)",
+            )
+
+    def edge_hit(self, L: _Lines) -> None:
+        """``ehit_any``: does any listed pair of these query rows fall in this key tile?
+
+        A query row lists ``K`` key positions, so a score tile away from them holds no edge at
+        all -- and bonds and hops are sequence-local, which makes that nearly every tile. The
+        test runs on the ``[BM]`` slot vectors rather than on ``[BM, BN]`` tiles, because the
+        tile's keys are exactly ``n_lo .. n_lo + BN``: ``K`` range checks on a vector decide
+        it, and the comparisons the term really needs stay on the path that is taken.
+        """
+        in_tile = " | ".join(
+            f"((ei{es} >= n_lo) & (ei{es} < n_lo + BN))" for es in range(self.st.edge_slots)
+        )
+        L(f"ehit_any = tl.max(({in_tile}).to(tl.int32)) > 0")
+
+    def edge_tile(self, o: _Orient, es: int) -> str:
+        """The ``[BM, BN]`` membership tile of one slot."""
+        return f"({o.q(f'ei{es}')} == {o.k('offs_n')})"
+
+    def _emask_loads(self, L: _Lines) -> None:
+        for es in range(self.st.edge_mask_slots):
+            L(
+                f"mi{es} = tl.load(MI + off_b * MI_s0 + q_tok * MI_s1 + {es} * MI_s2, "
+                "mask=m_valid, other=-1)"
+            )
 
     def masks(self, L: _Lines, o: _Orient) -> None:
         """Updates ``keep`` with the key mask and every mask term."""
@@ -259,15 +309,12 @@ class _Source:
                 f"keep = keep & {o.k('km != 0')}",
             )
         if st.edge_mask_slots:
-            L(f"ehit = tl.zeros({o.tile}, dtype=tl.int1)")
-            L("for es in tl.static_range(KMS):")
-            with L.indent():
-                L(
-                    "mi = tl.load(MI + off_b * MI_s0 + q_tok * MI_s1 + es * MI_s2, "
-                    "mask=m_valid, other=-1)",
-                    f"ehit = ehit | ({o.q('mi')} == {o.k('offs_n')})",
-                )
-            L("keep = keep & ehit")
+            if o.name != "qk":
+                self._emask_loads(L)
+            hits = " | ".join(
+                f"({o.q(f'mi{es}')} == {o.k('offs_n')})" for es in range(st.edge_mask_slots)
+            )
+            L(f"keep = keep & ({hits})")
         for p, spec in enumerate(st.pairs):
             if spec.role is not Role.MASK:
                 continue
@@ -277,33 +324,42 @@ class _Source:
             )
 
     def values(self, L: _Lines, o: _Orient, need_slope: bool) -> None:
-        """Evaluates every non-mask pair term into ``val{p}`` (plus what its gradient needs) and
-        applies the multipliers and biases to ``s``. Gates are combined into ``gate``."""
+        """Evaluates every non-mask pair term and applies it to ``s``, multipliers first so the
+        biases land on the scaled score. Gates are combined into ``gate``.
+
+        A bias is folded into ``s`` the moment it is read, which ends the life of its code and
+        value tiles there rather than at the end of the term list. That is safe in the backward
+        too: a bias term's upstream gradient is ``dS`` alone, and only a multiplier or a gate
+        divides its role's product by itself and so needs the other terms' values to survive.
+        """
         st = self.st
         mults, gates = [], []
-        for p, spec in enumerate(st.pairs):
-            if spec.role is Role.MASK:
-                continue
-            self._pair_value(L, o, p, spec, need_slope and spec.needs_slope)
-            if spec.role is Role.MULTIPLIER:
-                mults.append(p)
-            elif spec.role is Role.GATE:
-                gates.append(p)
-        if mults:
-            L("mult = " + " * ".join(f"val{p}" for p in mults), "s = s * mult")
-        for p, spec in enumerate(st.pairs):
-            if spec.role is Role.BIAS:
-                L(f"s = s + val{p}")
+        for role in (Role.MULTIPLIER, Role.BIAS, Role.GATE):
+            for p, spec in enumerate(st.pairs):
+                if spec.role is not role:
+                    continue
+                self._pair_value(L, o, p, spec, need_slope and spec.needs_slope)
+                if role is Role.MULTIPLIER:
+                    mults.append(p)
+                elif role is Role.GATE:
+                    gates.append(p)
+                else:
+                    L(f"s = s + val{p}")
+            if role is Role.MULTIPLIER and mults:
+                L("mult = " + " * ".join(f"val{p}" for p in mults), "s = s * mult")
         if st.edge_slots:
-            L("for es in tl.static_range(KES):")
+            if o.name != "qk":
+                self._edge_loads(L)
+            self.edge_hit(L)
+            L("if ehit_any:")
             with L.indent():
-                L(
-                    "ei = tl.load(EI + off_b * EI_s0 + q_tok * EI_s1 + es * EI_s2, "
-                    "mask=m_valid, other=-1)",
-                    "ev = tl.load(EV + off_b * EV_s0 + q_tok * EV_s1 + es * EV_s2 + off_h * EV_s3, "
-                    "mask=m_valid, other=0.0).to(tl.float32)",
-                    f"s = s + tl.where({o.q('ei')} == {o.k('offs_n')}, {o.q('ev')}, 0.0)",
+                # One sum, not one `s = s + ...` per slot: the adds chain through `s` and a
+                # hop term brings 40 of them to a score tile.
+                adds = " + ".join(
+                    f"tl.where({self.edge_tile(o, es)}, {o.q(f'ev{es}')}, 0.0)"
+                    for es in range(st.edge_slots)
                 )
+                L(f"s = s + ({adds})")
         if st.node_rank:
             if o.name == "qk":
                 L(
@@ -330,12 +386,15 @@ class _Source:
         call = f"FN{p}({', '.join(qs + ks)})"
         neutral = repr(float(spec.neutral))
         T = f"T{p}"
-        L(f"tb{p} = {T} + off_b * {T}_s0 + off_h * {T}_s1")
+        # The batch and head offsets are scalars, so 64 bits there cost nothing; the code and
+        # grid offsets are one per pair, and keeping them 32 bits halves both the arithmetic
+        # and the registers a live code tile occupies. `_table_args` enforces the bound.
+        L(f"tb{p} = {T} + off_b.to(tl.int64) * {T}_s0 + off_h.to(tl.int64) * {T}_s1")
         if spec.kind is Kind.CODE:
             L(
                 f"c{p} = tl.broadcast_to({call}, {o.tile}).to(tl.int32)",
                 f"ok{p} = (c{p} >= 0) & (c{p} < {spec.num_codes}) & valid",
-                f"cs{p} = tl.where(ok{p}, c{p}, 0).to(tl.int64)",
+                f"cs{p} = tl.where(ok{p}, c{p}, 0)",
                 f"val{p} = tl.load(tb{p} + cs{p} * {T}_s2, mask=ok{p}, other={neutral})",
             )
             return
@@ -344,7 +403,7 @@ class _Source:
                 f"c{p}, t{p} = {call}",
                 f"c{p} = tl.broadcast_to(c{p}, {o.tile}).to(tl.int32)",
                 f"ok{p} = (c{p} >= 0) & (c{p} < {spec.num_codes}) & valid",
-                f"cs{p} = tl.where(ok{p}, c{p}, 0).to(tl.int64)",
+                f"cs{p} = tl.where(ok{p}, c{p}, 0)",
                 f"t{p} = tl.broadcast_to(t{p}, {o.tile}).to(tl.float32)",
             )
             if spec.code_indexed:
@@ -372,7 +431,7 @@ class _Source:
             f"u{p} = tl.minimum(tl.maximum(u{p}, 0.0), {float(g - 1)!r})",
             f"i0f{p} = tl.minimum(tl.floor(u{p}), {float(g - 2)!r})",
             f"fr{p} = u{p} - i0f{p}",
-            f"i0{p} = i0f{p}.to(tl.int64)",
+            f"i0{p} = i0f{p}.to(tl.int32)",
             f"v0{p} = tl.load(tb{p} + i0{p} * {T}_s3, mask=ok{p}, other=0.0)",
             f"v1{p} = tl.load(tb{p} + (i0{p} + 1) * {T}_s3, mask=ok{p}, other=0.0)",
             f"val{p} = tl.where(ok{p}, v0{p} + (v1{p} - v0{p}) * fr{p}, {neutral})",
@@ -436,13 +495,12 @@ class _Source:
                 L(
                     f"lo{p} = tl.where({m}, dval{p} * (1.0 - fr{p}), 0.0)",
                     f"hi{p} = tl.where({m}, dval{p} * fr{p}, 0.0)",
-                    f"i0i{p} = i0{p}.to(tl.int32)",
                     f"for c in tl.static_range({n}):",
                 )
                 with L.indent():
                     L(
-                        f"racc{p} += tl.where({sel}, tl.sum(tl.where(i0i{p} == c, lo{p}, 0.0)) "
-                        f"+ tl.sum(tl.where(i0i{p} == c - 1, hi{p}, 0.0)), 0.0)"
+                        f"racc{p} += tl.where({sel}, tl.sum(tl.where(i0{p} == c, lo{p}, 0.0)) "
+                        f"+ tl.sum(tl.where(i0{p} == c - 1, hi{p}, 0.0)), 0.0)"
                     )
             return
         if mode == GradMode.PRIVATE:
@@ -452,7 +510,7 @@ class _Source:
             b_ptr = f"pbb{p} + cs{p}"
         else:
             D = f"DT{p}"
-            L(f"gb{p} = {D} + off_b * {D}_s0 + off_h * {D}_s1")
+            L(f"gb{p} = {D} + off_b.to(tl.int64) * {D}_s0 + off_h.to(tl.int64) * {D}_s1")
             base, s_code, s_grid = f"gb{p}", f"{D}_s2", f"{D}_s3"
             a_ptr = f"DA{p} + off_h * DA{p}_s0 + cs{p} * DA{p}_s1"
             b_ptr = f"DB{p} + off_h * DB{p}_s0 + cs{p} * DB{p}_s1"
@@ -560,11 +618,13 @@ def _gen_fwd(src: _Source) -> str:
             "m_i = tl.full([BM], float('-inf'), dtype=tl.float32)",
             "l_i = tl.zeros([BM], dtype=tl.float32)",
             "acc = tl.zeros([BM, BDV], dtype=tl.float32)",
-            "for start_n in range(0, k_len, BN):",
         )
+        src.hoist(L, o)
+        L("for start_n in range(0, k_len, BN):")
         with L.indent():
             L(
                 "offs_n = start_n + tl.arange(0, BN)",
+                "n_lo = start_n",
                 "n_valid = offs_n < k_len",
                 "k_tok = k_start + offs_n",
                 "valid = m_valid[:, None] & n_valid[None, :]",
@@ -649,6 +709,7 @@ def _gen_dkdv(src: _Source) -> str:
         L(
             "start_n = tl.program_id(0)",
             "offs_n = start_n * BN + tl.arange(0, BN)",
+            "n_lo = start_n * BN",
             "n_valid = offs_n < k_len",
             "k_tok = k_start + offs_n",
             "k = tl.load(K + off_b * K_s0 + off_h * K_s1 + k_tok[:, None] * K_s2 "
@@ -665,6 +726,7 @@ def _gen_dkdv(src: _Source) -> str:
                 "dnw = tl.zeros([BN, BR], dtype=tl.float32)",
             )
         src.feature_grad_init(L, "k", "BN")
+        src.hoist(L, o)
         L("for start_m in range(0, q_len, BM):")
         with L.indent():
             L(
@@ -766,10 +828,12 @@ def _gen_dq(src: _Source) -> str:
             L("dev = tl.zeros([BM, KESP], dtype=tl.float32)")
         src.feature_grad_init(L, "q", "BM")
         src.table_grad_init(L)
+        src.hoist(L, o)
         L("for start_n in range(0, k_len, BN):")
         with L.indent():
             L(
                 "offs_n = start_n + tl.arange(0, BN)",
+                "n_lo = start_n",
                 "n_valid = offs_n < k_len",
                 "k_tok = k_start + offs_n",
                 "valid = m_valid[:, None] & n_valid[None, :]",
@@ -804,14 +868,14 @@ def _gen_dq(src: _Source) -> str:
             if st.node_rank:
                 L("dnu += tl.dot(dS.to(k.dtype), nw.to(k.dtype), input_precision=PREC)")
             if st.edge_slots:
-                L("for es in tl.static_range(KES):")
+                L("if ehit_any:")
                 with L.indent():
-                    L(
-                        "ei = tl.load(EI + off_b * EI_s0 + q_tok * EI_s1 + es * EI_s2, "
-                        "mask=m_valid, other=-1)",
-                        "hit = tl.sum(tl.where(ei[:, None] == offs_n[None, :], dS, 0.0), axis=1)",
-                        "dev += tl.where(tl.arange(0, KESP)[None, :] == es, hit[:, None], 0.0)",
-                    )
+                    for es in range(st.edge_slots):
+                        L(
+                            f"hit{es} = tl.sum(tl.where({src.edge_tile(o, es)}, dS, 0.0), axis=1)",
+                            f"dev += tl.where(tl.arange(0, KESP)[None, :] == {es}, "
+                            f"hit{es}[:, None], 0.0)",
+                        )
             for p, spec in enumerate(st.pairs):
                 if spec.role is Role.MASK:
                     continue
@@ -845,8 +909,6 @@ def _extra_constexprs(st: Structure) -> list[str]:
     out = []
     if st.edge_slots:
         out += ["KES: tl.constexpr", "KESP: tl.constexpr"]
-    if st.edge_mask_slots:
-        out += ["KMS: tl.constexpr"]
     return out
 
 
@@ -936,8 +998,19 @@ def _t_args(t: torch.Tensor, ndim: int, zero_batch: bool = False) -> list:
     return [t, *s]
 
 
+#: The kernel indexes a table's code and grid axes in 32 bits, which is what keeps a live code
+#: tile at one register per pair. 2^31 float entries is an 8 GB slice -- unreachable on any GPU
+#: that also holds the activations -- so this is a guard and not a limit anyone meets.
+_MAX_TABLE_SLICE = 2**31
+
+
 def _table_args(t4: torch.Tensor, spec: PairSpec) -> list:
     """A table with one head row is shared by all heads: its head stride is zeroed."""
+    if t4.shape[2] * t4.shape[3] >= _MAX_TABLE_SLICE:
+        raise ValueError(
+            f"a table slice of {t4.shape[2]} x {t4.shape[3]} exceeds the kernel's 32-bit "
+            "index range; split the term"
+        )
     args = _t_args(t4, 4, not spec.per_sample)
     if t4.shape[1] == 1:
         args[2] = 0
@@ -1039,8 +1112,6 @@ class Launch:
         )
         if st.edge_slots:
             kw.update(KES=st.edge_slots, KESP=_next_pow2(st.edge_slots, 1))
-        if st.edge_mask_slots:
-            kw.update(KMS=st.edge_mask_slots)
         return kw
 
 
@@ -1135,9 +1206,14 @@ def backward(
     def zeros_like32(t):
         return torch.zeros(t.shape, device=t.device, dtype=torch.float32)
 
+    def zeros_strided32(t):
+        """A buffer whose strides match ``t``, so the kernel writes it the way it reads it."""
+        out = torch.empty_strided(t.shape, t.stride(), device=t.device, dtype=torch.float32)
+        return out.zero_()
+
     grads: dict = {}
     if st.edge_slots:
-        grads["edge_values"] = zeros_like32(tensors[slots["edge_values"]])
+        grads["edge_values"] = zeros_strided32(tensors[slots["edge_values"]])
     if st.node_rank:
         grads["node_u"] = zeros_like32(tensors[slots["node_u"]])
         grads["node_w"] = zeros_like32(tensors[slots["node_w"]])
