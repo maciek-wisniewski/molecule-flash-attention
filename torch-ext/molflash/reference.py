@@ -184,9 +184,14 @@ def attention(
     s = torch.where(keep, s, torch.full_like(s, _FILL))
     # Before the softmax, and 0.0 for a row with nothing left, which is what the
     # kernel's `m_safe` substitutes for -inf.
-    alive = keep.any(dim=-1, keepdim=True)
-    max_score = torch.where(alive, s.max(dim=-1, keepdim=True).values, torch.zeros_like(s[..., :1])).squeeze(-1)
-    max_score = max_score.expand(b, h, nq).contiguous()
+    # A packed batch may hold a sequence of no keys at all, and `max` refuses an empty axis.
+    if nk == 0:
+        max_score = s.new_zeros(b, h, nq)
+    else:
+        alive = keep.any(dim=-1, keepdim=True)
+        zero = torch.zeros_like(s[..., :1])
+        max_score = torch.where(alive, s.max(dim=-1, keepdim=True).values, zero).squeeze(-1)
+        max_score = max_score.expand(b, h, nq).contiguous()
     p = torch.softmax(s, dim=-1)
     p = torch.where(keep, p, torch.zeros_like(p))
     for term in _listify(gate):
