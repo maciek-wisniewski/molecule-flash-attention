@@ -155,6 +155,21 @@ def collect_terms(bias, mask, multiplier, gate) -> list:
     return out
 
 
+def token_major(t: torch.Tensor, token_dim: int) -> torch.Tensor:
+    """The same tensor laid out with the token axis innermost, keeping its shape.
+
+    A feature channel and a slot's index are each read one ``[BM]`` vector at a time inside the
+    tile loop. Over ``[B, N, K]`` that vector strides by ``K``, so every one of its ``BM``
+    elements lands in a different sector and the load costs ``BM`` transactions; over the same
+    tensor with ``N`` innermost it is one. The kernels read the strides by name, so nothing
+    there changes, and a tensor already in this layout is returned untouched.
+    """
+    dim = token_dim % t.dim()
+    order = [d for d in range(t.dim()) if d != dim] + [dim]
+    inverse = [order.index(d) for d in range(t.dim())]
+    return t.permute(order).contiguous().permute(inverse)
+
+
 def _feature_layout(features: list[torch.Tensor], varlen: bool):
     """``[B, N, C]`` views (``[1, T, C]`` under varlen), channel counts and float flags."""
     views, chans, floats = [], [], []
@@ -164,6 +179,9 @@ def _feature_layout(features: list[torch.Tensor], varlen: bool):
             f = f.unsqueeze(-1)
         is_float = f.is_floating_point()
         f = f.float() if is_float else f.to(torch.int32)
+        # A channel is read one [BM] vector at a time, so the token axis has to be the
+        # innermost one. `xyz[..., 0]` arrives with stride 3 and would cost BM transactions.
+        f = token_major(f, -2)
         if varlen:
             f = f.unsqueeze(0)
         views.append(f)
@@ -197,8 +215,8 @@ def build_plan(q, k, v, terms: list, key_mask, varlen: bool) -> Plan:
     if edges:
         index = torch.cat([e.index for e in edges], dim=-1).to(torch.int32)
         values = torch.cat([e.values for e in edges], dim=-2).float()
-        put("edge_index", token_view(index))
-        put("edge_values", token_view(values))
+        put("edge_index", token_view(token_major(index, -2)))
+        put("edge_values", token_view(token_major(values, -3)))
         edge_slots = int(index.shape[-1])
     else:
         put("edge_index", None)
@@ -207,7 +225,7 @@ def build_plan(q, k, v, terms: list, key_mask, varlen: bool) -> Plan:
 
     if emasks:
         index = emasks[0].index.to(torch.int32)
-        put("emask_index", token_view(index))
+        put("emask_index", token_view(token_major(index, -2)))
         emask_slots = int(index.shape[-1])
     else:
         put("emask_index", None)

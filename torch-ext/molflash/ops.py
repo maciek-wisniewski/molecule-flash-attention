@@ -10,7 +10,8 @@ def _grads_for_tensors(st, slots, pair_slots, tensors, grads) -> list[torch.Tens
     out = [torch.empty(0, device=t.device) for t in tensors]
 
     def put(slot, g):
-        out[slot] = g.view(tensors[slot].shape).to(tensors[slot].dtype)
+        t = tensors[slot]
+        out[slot] = (g if g.shape == t.shape else g.view(t.shape)).to(t.dtype)
 
     if st.edge_slots:
         put(slots["edge_values"], grads["edge_values"])
