@@ -94,8 +94,17 @@ def test_tabulated_module(device):
         torch.nn.Linear(1, 8), torch.nn.GELU(), torch.nn.Linear(8, H, bias=False)
     ).to(device)
     table = terms.tabulate(lambda x: mlp(x[:, None]), 0.0, 15.0, 64, device=device)
+    # A 64-entry table is accumulated with atomics, whose order is not fixed, and the MLP's
+    # gradient reaches each of its parameters through all 64 entries. On a GPU that lands at
+    # 2.0e-4 against the 2e-4 the suite uses for float32 elsewhere, so whether it passes is
+    # luck: it fails in a full run and passes ten times out of ten on its own.
     check(
-        q, k, v, list(mlp.parameters()), bias=terms.distance_function(table, pos, grid=(0.0, 15.0))
+        q,
+        k,
+        v,
+        list(mlp.parameters()),
+        tol=5e-4,
+        bias=terms.distance_function(table, pos, grid=(0.0, 15.0)),
     )
 
 
