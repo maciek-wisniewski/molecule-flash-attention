@@ -255,6 +255,43 @@ def same_label(table, label) -> PairBias:
 # ----- graphs --------------------------------------------------------------------------------
 
 
+#: Rows per one-hot chunk in `_RowLookup`'s backward: 2^18 x 64 rows x 4 bytes is 64 MiB.
+_ONEHOT_CHUNK = 1 << 18
+#: Above this many rows the one-hot is wider than the gradient it reduces, so the scatter wins.
+_ONEHOT_MAX_ROWS = 64
+
+
+class _RowLookup(torch.autograd.Function):
+    """``table[index]`` whose backward sums by matmul rather than by scatter.
+
+    Every listed bond of every atom reads one of a handful of rows, so ``table[index]``'s own
+    backward puts one atomic per listed bond on a handful of addresses, and those serialise:
+    at B=4, N=2048, 8 slots and 4 heads it is 262,144 atomics on 20 floats, measured on an
+    A100 at 22 ns each -- 5.8 ms, against 0.9 ms for the attention backward the term sits in.
+    A one-hot matmul reads each gradient once and is bound by memory, not by contention.
+    """
+
+    @staticmethod
+    def forward(ctx, table, index):
+        ctx.save_for_backward(index)
+        ctx.rows = table.shape[0]
+        return table[index]
+
+    @staticmethod
+    def backward(ctx, grad):
+        (index,) = ctx.saved_tensors
+        flat = grad.reshape(-1, grad.shape[-1])
+        keys = index.reshape(-1)
+        out = flat.new_zeros(ctx.rows, flat.shape[-1])
+        if ctx.rows > _ONEHOT_MAX_ROWS:
+            return out.index_add_(0, keys, flat), None
+        for start in range(0, flat.shape[0], _ONEHOT_CHUNK):
+            part = slice(start, start + _ONEHOT_CHUNK)
+            hot = torch.nn.functional.one_hot(keys[part], ctx.rows).to(flat.dtype)
+            out += hot.t() @ flat[part]
+        return out, None
+
+
 def bonds(table, index, bond_type) -> EdgeBias:
     """``table [num_types, H]`` read at the type of every listed bond.
 
@@ -262,7 +299,7 @@ def bonds(table, index, bond_type) -> EdgeBias:
     types; list both directions of every bond.
     """
     types = bond_type.long().clamp(min=0)
-    return EdgeBias(index, table[types])
+    return EdgeBias(index, _RowLookup.apply(table, types))
 
 
 def edge_features(index, features, proj) -> EdgeBias:
