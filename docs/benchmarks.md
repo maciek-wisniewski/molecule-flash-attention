@@ -248,6 +248,6 @@ python benchmarks/run.py accuracy --n 2048 --out results.jsonl
 python benchmarks/report.py results.jsonl
 ```
 
-The per-term ablation and the table-gradient mode sweep (registers against private buffers, by table size) print JSON lines: `python benchmarks/ablate_terms.py` and `python benchmarks/grad_mode_sweep.py`.
+The per-term ablation, the table-gradient mode sweep (registers against private buffers, by table size) and the block-shape sweep (private buffers against atomic additions into the shared table) print JSON lines: `python benchmarks/ablate_terms.py`, `python benchmarks/grad_mode_sweep.py` and `python benchmarks/tune_blocks.py`.
 
 The FlashBias baseline needs `flash_bias_triton.py` from https://github.com/thuml/FlashBias on the path given by `MOLFLASH_FLASHBIAS`. The cuEquivariance baseline needs `pip install cuequivariance-torch cuequivariance-ops-torch-cu13`.
