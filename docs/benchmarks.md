@@ -19,7 +19,7 @@ Every method computes the same function from the same terms, except the last row
 | `eager` | plain PyTorch, every `[B, H, N, N]` tensor explicit | yes |
 | `sdpa (no bias)` | SDPA without any bias (FlashAttention-2 backend) | no |
 
-Times are the median of 10 CUDA-event-timed calls after warm-up. "fwd+bwd" is one forward and one backward producing gradients for q, k, v and every learned tensor of the terms. Peak memory is `torch.cuda.max_memory_allocated` during the timed calls. bfloat16, batch 1, 8 heads of dimension 64 unless stated.
+Times are the median of `--reps` CUDA-event-timed calls after warm-up (default 10; the published speed tables used `--reps 5`). "fwd+bwd" is one forward and one backward producing gradients for q, k, v and every learned tensor of the terms. Peak memory is `torch.cuda.max_memory_allocated` during the timed calls. bfloat16, batch 1, 8 heads of dimension 64 unless stated.
 
 ## Scenarios
 
