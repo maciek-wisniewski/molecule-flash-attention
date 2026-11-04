@@ -267,7 +267,7 @@ class _RowLookup(torch.autograd.Function):
     Every listed bond of every atom reads one of a handful of rows, so ``table[index]``'s own
     backward puts one atomic per listed bond on a handful of addresses, and those serialise:
     at B=4, N=2048, 8 slots and 4 heads it is 262,144 atomics on 20 floats, measured on an
-    A100 at 22 ns each -- 5.8 ms, against 0.9 ms for the attention backward the term sits in.
+    A100 at 22 ns each: 5.8 ms, against 0.9 ms for the attention backward the term sits in.
     A one-hot matmul reads each gradient once and is bound by memory, not by contention.
     """
 

@@ -32,7 +32,7 @@ out = mf.attention(q, k, v, bias=mf.terms.distance_function(table, pos, grid=(0.
 
 ### Seeing the scores
 
-A score tile never leaves the kernel, which is what keeps memory linear — and it means you cannot inspect one afterwards. The one number you can have is the largest pre-softmax score of each query row, because the online softmax already tracks it for stability:
+A score tile never leaves the kernel. That is what keeps memory linear, and it means you cannot inspect one afterwards. The one number you can have is the largest pre-softmax score of each query row, because the online softmax already tracks it for stability:
 
 ```python
 out, max_score = mf.attention(
@@ -45,7 +45,7 @@ assert max_score.shape == (B, H, N)      # one float per query row, float32
 
 It costs one store per query row and no arithmetic. That is `B·H·Nq` floats against the `B·H·Nq·Dv` the output already writes, so at 24,576 tokens, 4 heads and a head dimension of 128 it is 0.8% of what the kernel stores anyway.
 
-It is a diagnostic rather than a term: it carries no gradient, and asking for it changes neither the output nor the backward. Reach for it when a bias can grow without bound while `q·k` cannot — a learned table has no ceiling the way a normalised dot product does — or to drive a clipping rule from the real maximum instead of from a bound. A row whose keys are all masked away reads `0.0`, the value the kernel substitutes for an empty row's `-inf`.
+It is a diagnostic rather than a term: it carries no gradient, and asking for it changes neither the output nor the backward. Reach for it when a bias can grow without bound while `q·k` cannot (a learned table has no ceiling the way a normalised dot product does), or to drive a clipping rule from the real maximum instead of from a bound. A row whose keys are all masked away reads `0.0`, the value the kernel substitutes for an empty row's `-inf`.
 
 ## Three primitives
 

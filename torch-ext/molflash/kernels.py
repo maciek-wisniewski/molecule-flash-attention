@@ -279,10 +279,10 @@ class _Source:
         """``ehit_any``: does any listed pair of these query rows fall in this key tile?
 
         A query row lists ``K`` key positions, so a score tile away from them holds no edge at
-        all -- and bonds and hops are sequence-local, which makes that nearly every tile. The
+        all, and bonds and hops are sequence-local, which makes that nearly every tile. The
         test runs on the ``[BM]`` slot vectors rather than on ``[BM, BN]`` tiles, because the
         tile's keys are exactly ``n_lo .. n_lo + BN``: ``K`` range checks on a vector decide
-        it, and the comparisons the term really needs stay on the path that is taken.
+        it, and the comparisons the term needs stay on the path that is taken.
         """
         in_tile = " | ".join(
             f"((ei{es} >= n_lo) & (ei{es} < n_lo + BN))" for es in range(self.st.edge_slots)
@@ -670,7 +670,7 @@ def _gen_fwd(src: _Source) -> str:
             "tl.store(LSE + off_b * LSE_s0 + off_h * LSE_s1 + q_tok * LSE_s2, "
             "m_safe + tl.log(l_safe), mask=m_valid)",
             # The largest score this row saw, before the softmax. `m_i` carries it
-            # already -- the online softmax subtracts it for stability -- so this is a
+            # already (the online softmax subtracts it for stability), so this is a
             # store and no arithmetic: one float per query row, never per pair. A row
             # with no key left keeps the 0.0 that `m_safe` substitutes for -inf.
             "tl.store(MAXS + off_b * MAXS_s0 + off_h * MAXS_s1 + q_tok * MAXS_s2, "
@@ -999,8 +999,8 @@ def _t_args(t: torch.Tensor, ndim: int, zero_batch: bool = False) -> list:
 
 
 #: The kernel indexes a table's code and grid axes in 32 bits, which is what keeps a live code
-#: tile at one register per pair. 2^31 float entries is an 8 GB slice -- unreachable on any GPU
-#: that also holds the activations -- so this is a guard and not a limit anyone meets.
+#: tile at one register per pair. 2^31 float entries is an 8 GB slice, unreachable on any GPU
+#: that also holds the activations, so this is a guard and not a limit anyone meets.
 _MAX_TABLE_SLICE = 2**31
 
 

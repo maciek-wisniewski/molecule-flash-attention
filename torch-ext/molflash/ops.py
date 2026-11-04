@@ -182,7 +182,7 @@ def attention(
         softmax_scale: defaults to ``D ** -0.5``.
         return_max_score: also return the largest pre-softmax score of every query
             row, ``[B, H, Nq]`` float32. The kernel tracks it anyway, so this costs
-            one store per row and no arithmetic -- there is no other way to see it,
+            one store per row and no arithmetic. There is no other way to see it,
             because a score tile never leaves the kernel. Rows with no key left read
             0.0. Not differentiable.
 

@@ -4,7 +4,7 @@ Speed, memory and accuracy of `molflash.attention` against other ways of computi
 
 ## What is compared
 
-Every method computes the same function from the same terms, except the last row of each table, which drops the bias and serves as a speed limit.
+Every method computes the same function from the same terms, except the last row of each table, which drops the bias and gives the speed limit.
 
 | method | how the bias is applied | stores an N × N tensor |
 |---|---|---|

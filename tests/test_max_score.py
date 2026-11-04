@@ -2,7 +2,7 @@
 
 A score tile never leaves the kernel, so this is the only way to see one. The online softmax
 already tracks the row maximum for stability, so the kernel stores what it had rather than
-computing anything new -- and these tests are what say the two agree.
+computing anything new. These tests check that the two agree.
 """
 
 import molflash as mf
