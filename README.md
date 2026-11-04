@@ -18,7 +18,7 @@ It is also published as a Hugging Face kernel:
 
 ```
 from kernels import get_kernel
-mf = get_kernel("SFGLab/molflash", version=1, trust_remote_code=True)
+mf = get_kernel("maciek-wisniewski/molflash", version=1, trust_remote_code=True)
 ```
 
 ## Example

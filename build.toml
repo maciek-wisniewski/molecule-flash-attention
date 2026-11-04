@@ -7,6 +7,6 @@ license = "Apache-2.0"
 backends = ["cuda"]
 
 [general.hub]
-repo-id = "SFGLab/molflash"
+repo-id = "maciek-wisniewski/molflash"
 
 [torch-noarch]
