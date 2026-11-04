@@ -23,14 +23,14 @@ Times are the median of 10 CUDA-event-timed calls after warm-up. "fwd+bwd" is on
 
 ## Scenarios
 
-Coordinates fill a sphere at the heavy-atom density of a protein (one atom per 20 Å³), ordered along a space-filling curve so that sequence neighbours are spatial neighbours.
+All four scenarios use the same coordinates and differ only in the terms they compute. The coordinates fill a sphere at the heavy-atom density of a protein (one atom per 20 Å³), ordered along a space-filling curve so that sequence neighbours are spatial neighbours. A scenario's key is the name `run.py --scenario` takes and the name the tables below show.
 
 | scenario | terms |
 |---|---|
-| `molecule` | bonds (`EdgeBias`, 4 slots) + learned distance curve (128 points) |
-| `protein` | relative position (±32) + learned distance curve + 15 Å cutoff mask |
-| `complex` | bonds + distance curve + relative position + same chain + rank-8 bias from per-atom embeddings + 15 Å mask |
-| `lowrank` | rank-16 bias from per-atom embeddings only |
+| `molecule` (learned distance + bonds) | bonds (`EdgeBias`, 4 slots) + learned distance curve (128 points) |
+| `protein` (sequence offset + learned distance + 15 Å cutoff) | relative position (±32) + learned distance curve + 15 Å cutoff mask |
+| `complex` (all terms + 15 Å cutoff) | bonds + distance curve + relative position + same chain + rank-8 bias from per-atom embeddings + 15 Å mask |
+| `lowrank` (rank-16 embedding product) | rank-16 bias from per-atom embeddings only |
 
 ## Results
 
@@ -172,7 +172,7 @@ NVIDIA H200 (141 GB). Same layout as the A100 table.
 | protein | eager | 569.9 ms, 10.52 GB | OOM | OOM |
 | protein | sdpa (no bias) | 0.3 ms, 0.11 GB | 4.0 ms, 0.24 GB | 16.7 ms, 0.41 GB |
 
-On Hopper the kernel is further from the speed of attention without a bias than on the A100: it is not tuned for that architecture (no TMA or warp specialisation), and plain attention through the same kernel takes 2.9 ms at N = 8192 on the H100 against 1.5 ms for SDPA. The same holds against FlashBias on the low-rank scenario, where FlashBias is about 2× faster on the H100 and H200 and within 3 to 13% on the A100. In the scenarios with distances, bonds and masks the comparison with the other methods is the same on all three GPUs.
+On Hopper the kernel is further from the speed of attention without a bias than on the A100: it is not tuned for that architecture (no TMA or warp specialisation), and plain attention through the same kernel takes 2.9 ms at N = 8192 on the H100 against 1.5 ms for SDPA. The same holds against FlashBias on `lowrank` (rank-16 embedding product), where FlashBias is about 2× faster on the H100 and H200 and within 3 to 13% on the A100. In the scenarios with distances, bonds and masks the comparison with the other methods is the same on all three GPUs.
 
 ![Time and memory against N on the H100](figures/scaling_H100_PCIe.png)
 ![Time and memory against N on the H200](figures/scaling_H200.png)

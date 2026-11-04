@@ -57,14 +57,14 @@ The same primitives act as masks (with skipping of empty tiles), multipliers on 
 
 ## Speed and memory
 
-One attention layer, forward and backward, 8 heads of 64, bfloat16, on an A100 40 GB. "protein" adds relative position, a learned distance curve and a 15 Å mask; "molecule" adds bonds and a learned distance curve. Full tables, more baselines and the method are in [docs/benchmarks.md](docs/benchmarks.md).
+One attention layer, forward and backward, 8 heads of 64, bfloat16, on an A100 40 GB, for two sets of terms on the same coordinates: sequence offset + learned distance + 15 Å cutoff (`protein` in the benchmark scripts), and learned distance + bonds (`molecule`). Full tables, more baselines and the method are in [docs/benchmarks.md](docs/benchmarks.md).
 
-| scenario | N | molflash | FlexAttention | SDPA + dense bias |
+| terms | N | molflash | FlexAttention | SDPA + dense bias |
 |---|---|---|---|---|
-| protein | 4,096 | 4.6 ms, 0.07 GB | 167 ms, 0.23 GB | 743 ms, 9.7 GB |
-| protein | 32,768 | 96 ms, 0.41 GB | 3,579 ms, 12.2 GB | out of memory |
-| molecule | 4,096 | 14.5 ms, 0.07 GB | 116 ms, 0.07 GB | 485 ms, 9.4 GB |
-| molecule | 32,768 | 898 ms, 0.42 GB | 18,718 ms, 0.33 GB | out of memory |
+| offset + distance + cutoff | 4,096 | 4.6 ms, 0.07 GB | 167 ms, 0.23 GB | 743 ms, 9.7 GB |
+| offset + distance + cutoff | 32,768 | 96 ms, 0.41 GB | 3,579 ms, 12.2 GB | out of memory |
+| distance + bonds | 4,096 | 14.5 ms, 0.07 GB | 116 ms, 0.07 GB | 485 ms, 9.4 GB |
+| distance + bonds | 32,768 | 898 ms, 0.42 GB | 18,718 ms, 0.33 GB | out of memory |
 
 ## Documentation
 

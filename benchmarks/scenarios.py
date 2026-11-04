@@ -1,6 +1,7 @@
-"""Three synthetic workloads with the shape of real ones. Coordinates fill a sphere at the heavy
-atom density of a protein (one atom per 20 A^3) and are ordered along a space-filling curve, so
-sequence neighbours are spatial neighbours, as in a chain."""
+"""Four synthetic workloads that share coordinates and differ only in their terms. Coordinates
+fill a sphere at the heavy atom density of a protein (one atom per 20 A^3) and are ordered along
+a space-filling curve, so sequence neighbours are spatial neighbours, as in a chain. The ``name``
+of each class is its key on the command line and in result files."""
 
 import math
 
