@@ -2,9 +2,15 @@
 T(N) = alpha N^2 + beta K(N) to measured times.
 
     python tile_occupancy.py [--cutoff 15] [--results a100.jsonl --scenario protein]
+    python tile_occupancy.py --xyz 1AON.xyz ...
 
 Runs on the CPU. K(N) counts the forward tiles (32 queries x 64 keys) with at least one pair
-closer than the cutoff; the coordinates are those of scenarios.coordinates.
+closer than the cutoff; the coordinates are those of scenarios.coordinates, or, with --xyz,
+real structures (one "x y z" line per heavy atom, in file order) in their own order, in Morton
+order and in random order. To write such a file from an mmCIF or PDB file with gemmi:
+
+    st = gemmi.read_structure(path); st.remove_waters(); st.remove_hydrogens()
+    lines = [f"{a.pos.x} {a.pos.y} {a.pos.z}" for ch in st[0] for r in ch for a in r]
 """
 
 import argparse
@@ -17,8 +23,21 @@ from scenarios import coordinates
 NS = [1024, 2048, 4096, 8192, 16384, 32768]
 
 
-def occupancy(n, cutoff, bm=32, bn=64, chunk=1024):
-    x = coordinates(1, n, "cpu")[0]
+def morton(x, cell=4.0):
+    """The order of scenarios.coordinates: Morton code of 4 A cells."""
+    c = ((x - x.min(0).values) / cell).long()
+    code = torch.zeros(len(x), dtype=torch.long)
+    for bit in range(10):
+        for axis in range(3):
+            code |= ((c[:, axis] >> bit) & 1) << (3 * bit + axis)
+    return x[code.argsort()]
+
+
+def occupancy(n, cutoff, bm=32, bn=64, chunk=1024, x=None):
+    if x is None:
+        x = coordinates(1, n, "cpu")[0]
+    n = len(x) // bn * bn
+    x = x[:n]
     pairs = 0
     kept = torch.zeros(n // bm, n // bn, dtype=torch.bool)
     for s in range(0, n, chunk):
@@ -55,8 +74,21 @@ def main():
     p.add_argument("--cutoff", type=float, default=15.0)
     p.add_argument("--results", help="run.py speed output to fit")
     p.add_argument("--scenario", nargs="+", default=["protein", "complex"])
+    p.add_argument("--xyz", nargs="+", help="real structures, one 'x y z' line per atom")
     a = p.parse_args()
     torch.manual_seed(0)
+    if a.xyz:
+        for path in a.xyz:
+            with open(path) as f:
+                x = torch.tensor([[float(v) for v in line.split()] for line in f])
+            orders = {"file": x, "morton": morton(x), "random": x[torch.randperm(len(x))]}
+            for name, y in orders.items():
+                nbrs, kept, _ = occupancy(0, a.cutoff, x=y)
+                print(
+                    f"{path} ({len(x)} atoms), {name} order: {nbrs:.0f} neighbours, "
+                    f"{kept:.1%} of tiles kept"
+                )
+        return
     print(f"bulk neighbours: {4 / 3 * math.pi * a.cutoff**3 / 20.0:.0f}")
     frac = {}
     for n in NS:
