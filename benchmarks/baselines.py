@@ -165,7 +165,11 @@ def flex(q, k, v, kw):
         from torch.nn.attention.flex_attention import noop_mask
 
         b, _, nq, _ = q.shape
-        block_mask = create_block_mask(mask_mod, b, None, nq, k.shape[2], device=q.device)
+        # Rebuilt in every call, as in training where coordinates change between steps;
+        # compiled, so the mask is never materialised at N x N.
+        block_mask = create_block_mask(
+            mask_mod, b, None, nq, k.shape[2], device=q.device, _compile=True
+        )
         # A mask_mod holding captured tensors breaks the compiled backward in this PyTorch
         # version, so the mask is applied in score_mod (-inf) and the block mask is kept only
         # to skip empty blocks.
