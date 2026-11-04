@@ -35,6 +35,40 @@ def sdpa_bias(q, k, v, kw):
     return F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
 
 
+_BUILD = None
+
+
+def sdpa_compiled_bias(q, k, v, kw):
+    """SDPA with the dense bias built by a torch.compile'd builder, which fuses the elementwise
+    work of the terms; the bias is still stored and its gradient still written."""
+    global _BUILD
+    if kw.get("key_mask") is not None:
+        raise NotImplementedError("no key mask")
+    _GIVEN.clear()  # a cached bias from sdpa_given_bias must not count in this peak
+    if _BUILD is None:
+        _BUILD = torch.compile(_dense_bias, dynamic=False)
+    return F.scaled_dot_product_attention(q, k, v, attn_mask=_BUILD(q, k, kw, q.dtype))
+
+
+_GIVEN = {}
+
+
+def sdpa_given_bias(q, k, v, kw):
+    """SDPA with a dense bias that already exists as a leaf tensor: the attention part of a
+    dense-bias pipeline alone, without building the bias or reducing its gradient onto the
+    parameters. A lower bound for any method that stores the bias."""
+    if kw.get("key_mask") is not None:
+        raise NotImplementedError("no key mask")
+    key = (id(kw), q.shape, q.dtype)
+    if key not in _GIVEN:
+        _GIVEN.clear()
+        with torch.no_grad():
+            bias = _dense_bias(q, k, kw, q.dtype)
+        _GIVEN[key] = bias.requires_grad_(True)
+    _GIVEN[key].grad = None  # written, not accumulated, in every call
+    return F.scaled_dot_product_attention(q, k, v, attn_mask=_GIVEN[key])
+
+
 def sdpa_plain(q, k, v, kw):
     """No bias at all: the speed of attention without structure, not a comparable result."""
     return F.scaled_dot_product_attention(q, k, v)
@@ -296,6 +330,8 @@ METHODS = {
     "molflash": molflash,
     "flex": flex,
     "sdpa+bias": sdpa_bias,
+    "sdpa+compiled bias": sdpa_compiled_bias,
+    "sdpa (bias given)": sdpa_given_bias,
     "flashbias": flashbias,
     "cuequivariance": cuequivariance,
     "xformers": xformers,

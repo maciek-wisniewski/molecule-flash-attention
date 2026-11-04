@@ -16,6 +16,8 @@ Every method computes the same function from the same terms, except the last row
 | `ds4sci` | DeepSpeed `DS4Sci_EvoformerAttention` (CUTLASS) with the dense bias; float16 and bfloat16 only | yes |
 | `turbopairformer` | TurboPairFormer triangle-attention kernel with the dense bias; Hopper GPUs and bfloat16 only | yes |
 | `sdpa+bias` | dense bias built in PyTorch, passed to `F.scaled_dot_product_attention` as a float mask | yes |
+| `sdpa+compiled bias` | as `sdpa+bias`, with the bias builder compiled by `torch.compile` | yes |
+| `sdpa (bias given)` | SDPA with the dense bias already built (not timed) as a bfloat16 leaf: the attention part of a dense pipeline alone, a lower bound for any method that stores the bias | yes |
 | `eager` | plain PyTorch, every `[B, H, N, N]` tensor explicit | yes |
 | `sdpa (no bias)` | SDPA without any bias (FlashAttention-2 backend) | no |
 
