@@ -55,6 +55,11 @@ without materializing full fp32 casts or a full fp32 elementwise product. This d
 change the attention definition, required gradients or asymptotic memory bound. Reduction
 order can differ from PyTorch's row sum; numerical agreement is tested within tolerance.
 
+For discrete table gradients that use atomic histograms, a tile whose valid pairs all
+select the same code is reduced in fp32 before one atomic update. Mixed-code tiles keep
+the ordinary histogram path. This preserves every learned gradient and requires no
+molecule-specific code values, dense pair cache or lower-precision accumulation.
+
 ## Three primitives
 
 Every term is built from one of three primitives. They differ in which pairs they reach and where the value of a pair comes from.
