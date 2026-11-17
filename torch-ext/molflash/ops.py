@@ -121,7 +121,13 @@ def _(q, k, v, o, lse, do, tensors, key, scale, cu_q, cu_k, max_q, max_k,
         has_grad |= {ps["q"][f] for f, n in enumerate(spec.q_feat_grad) if n}
         has_grad |= {ps["k"][f] for f, n in enumerate(spec.k_feat_grad) if n}
     for i, t in enumerate(tensors):
-        grads.append(torch.empty_like(t) if i in has_grad else t.new_empty(0, dtype=torch.float32))
+        if i not in has_grad:
+            gradient = t.new_empty(0, dtype=torch.float32)
+        elif st.edge_slots and i == slots["edge_values"]:
+            gradient = torch.empty_strided(t.shape, t.stride(), dtype=t.dtype, device=t.device)
+        else:
+            gradient = t.new_empty(t.shape)
+        grads.append(gradient)
     return grads
 
 

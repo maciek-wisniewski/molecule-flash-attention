@@ -216,6 +216,12 @@ Table gradients are accumulated with atomics in one of three ways, chosen per ca
 
 The backward is differentiable once. Gradients of gradients (`create_graph=True`) and forward-mode AD are not implemented; see [Not supported yet](#not-supported-yet).
 
+The custom backward's fake metadata mirrors its real output buffers: Q/K/V gradients
+use PyTorch's preserved memory format, edge-value gradients retain their internal packed
+strides, and table, affine, node and floating-feature gradients are contiguous. This is
+the custom-op boundary used by `torch.compile`, not a requirement on a leaf Parameter's
+eventual `.grad` layout, which PyTorch's gradient accumulator controls.
+
 ## Batching: padding and varlen
 
 `mf.attention` takes padded batches `[B, H, N, D]` with `key_mask` marking real tokens. When sizes vary a lot, padding wastes work: a batch of one large and 31 small molecules computes 32 large attention maps. `mf.attention_varlen` takes the sequences concatenated instead, in the layout of `flash_attn_varlen_func`:
