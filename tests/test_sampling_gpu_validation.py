@@ -8,6 +8,7 @@ from torch.utils.checkpoint import checkpoint
 
 sampling = pytest.importorskip("molflash.sampling")
 pytestmark = pytest.mark.gpu
+LABEL_DISTANCE = mf.pair_function(label_distance)
 
 
 def verify_sampled_all_input_gradients(
@@ -55,13 +56,13 @@ def verify_sampled_all_input_gradients(
                 distance * gate[:, None], q_pos=pq, k_pos=pk, grid=(0.0, 8.0),
             ),
             mf.PairBias(
-                label_distance, q_features=query_labels, k_features=key_labels,
+                LABEL_DISTANCE, q_features=query_labels, k_features=key_labels,
                 table=relation * gate[:, None], torch_fn=label_distance_torch,
             ),
             mf.EdgeBias(edge_index, bond[edge_type] * gate),
             mf.EdgeBias(edge_index.flip(-1), hop[hop_type] * gate),
             mf.PairBias(
-                label_distance, q_features=query_labels % 3, k_features=key_labels % 3,
+                LABEL_DISTANCE, q_features=query_labels % 3, k_features=key_labels % 3,
                 table=pocket * gate[:, None], torch_fn=label_distance_torch,
             ),
         ]
@@ -69,11 +70,11 @@ def verify_sampled_all_input_gradients(
         return operation(
             query, key, value, bias=terms, key_mask=key_mask,
             multiplier=mf.PairScale(
-                label_distance, q_features=query_labels % 3, k_features=key_labels % 3,
+                LABEL_DISTANCE, q_features=query_labels % 3, k_features=key_labels % 3,
                 table=1.0 + 0.1 * pocket, torch_fn=label_distance_torch,
             ),
             gate=mf.PairGate(
-                label_distance, q_features=query_labels, k_features=key_labels,
+                LABEL_DISTANCE, q_features=query_labels, k_features=key_labels,
                 table=1.0 + 0.1 * relation, torch_fn=label_distance_torch,
             ),
             **kwargs,
@@ -108,3 +109,43 @@ def test_sampled_backward_matches_dense_weighted_output_gradient_for_every_input
     dtype: torch.dtype, recompute: bool,
 ) -> None:
     verify_sampled_all_input_gradients(dtype, recompute, "cuda")
+
+
+def test_compiled_positive_budget_matches_eager_large_code_table_gradients() -> None:
+    torch.manual_seed(640)
+    rows, heads, length, dimension = 1, 2, 129, 32
+    inputs = [
+        torch.randn(rows, heads, length, dimension, device="cuda", dtype=torch.bfloat16)
+        .requires_grad_()
+        for _ in range(3)
+    ]
+    table = (0.1 * torch.randn(257, heads, device="cuda")).T.requires_grad_()
+    inputs.append(table)
+    labels = torch.arange(length, device="cuda").expand(rows, -1) * 2
+    config = mf.BackwardSampling(budget=0.2, block_size=32, seed=641)
+
+    def operation(
+        q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias_table: torch.Tensor,
+    ) -> torch.Tensor:
+        return mf.attention(
+            q, k, v,
+            bias=mf.PairBias(
+                LABEL_DISTANCE, labels, bias_table,
+                torch_fn=label_distance_torch,
+            ),
+            backward_sampling=config,
+        )
+
+    compiled = torch.compile(operation, fullgraph=True)
+    expected = operation(*inputs)
+    actual = compiled(*inputs)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    upstream = torch.randn_like(actual)
+    upstream[:, :, 96:] *= 0.01
+    actual_gradients = torch.autograd.grad(actual, inputs, upstream)
+    expected_gradients = torch.autograd.grad(expected, inputs, upstream)
+    for actual, expected in zip(actual_gradients, expected_gradients, strict=True):
+        actual, expected = actual.float(), expected.float()
+        assert torch.isfinite(actual).all()
+        error = (actual - expected).abs().max() / expected.abs().max().clamp(min=0.05)
+        assert error.item() <= TOL[torch.bfloat16]

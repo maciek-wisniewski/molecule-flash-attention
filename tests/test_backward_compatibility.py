@@ -7,6 +7,8 @@ from _util import CUDA, DTYPES, TOL, check, label_distance, label_distance_torch
 from molflash.varlen import cu_seqlens
 from torch.utils.checkpoint import checkpoint
 
+LABEL_DISTANCE = mf.pair_function(label_distance)
+
 
 def _strided(shape: tuple[int, ...], device: str, dtype: torch.dtype) -> torch.Tensor:
     return torch.randn(*shape[:-1], shape[-1] * 2, device=device, dtype=dtype)[
@@ -48,7 +50,7 @@ def _chain(
         result = operation(
             query, k, v,
             bias=mf.PairBias(
-                label_distance, q_features=query_labels, k_features=key_labels,
+                LABEL_DISTANCE, q_features=query_labels, k_features=key_labels,
                 table=table * gate[:, None], torch_fn=label_distance_torch,
             ),
             key_mask=mask,
@@ -104,7 +106,7 @@ def test_strided_cross_attention_large_table_at_supported_head_widths(
     check(
         q, k, v, [table], key_mask=mask,
         bias=mf.PairBias(
-            label_distance, q_features=query_labels, k_features=key_labels,
+            LABEL_DISTANCE, q_features=query_labels, k_features=key_labels,
             table=table, torch_fn=label_distance_torch,
         ),
     )
@@ -150,7 +152,7 @@ def test_edge_slots_keep_duplicate_and_masked_contributions(
             mf.EdgeBias(index[..., :3].flip(-1), values[..., :3, :] * 0.3),
         ],
         mask=mf.PairMask(
-            label_distance, q_features=query_labels, k_features=key_labels,
+            LABEL_DISTANCE, q_features=query_labels, k_features=key_labels,
             torch_fn=label_distance_torch,
         ),
     )
