@@ -124,7 +124,9 @@ def _(q, k, v, o, lse, do, tensors, key, scale, cu_q, cu_k, max_q, max_k,
         if i not in has_grad:
             gradient = t.new_empty(0, dtype=torch.float32)
         elif st.edge_slots and i == slots["edge_values"]:
-            gradient = torch.empty_strided(t.shape, t.stride(), dtype=t.dtype, device=t.device)
+            gradient = torch.empty_strided(
+                t.shape, t.stride(), dtype=torch.float32, device=t.device
+            ).to(t.dtype)
         else:
             gradient = t.new_empty(t.shape)
         grads.append(gradient)

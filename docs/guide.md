@@ -222,7 +222,8 @@ The backward is differentiable once. Gradients of gradients (`create_graph=True`
 
 The custom backward's fake metadata mirrors its real output buffers: Q/K/V gradients
 use PyTorch's preserved memory format, edge-value gradients retain their internal packed
-strides, and table, affine, node and floating-feature gradients are contiguous. This is
+strides while accumulating in FP32, followed by conversion to the operand dtype;
+table, affine, node and floating-feature gradients are contiguous. This is
 the custom-op boundary used by `torch.compile`, not a requirement on a leaf Parameter's
 eventual `.grad` layout, which PyTorch's gradient accumulator controls.
 
