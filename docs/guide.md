@@ -47,6 +47,14 @@ It costs one store per query row and no arithmetic. That is `B·H·Nq` floats ag
 
 It is a diagnostic rather than a term: it carries no gradient, and asking for it changes neither the output nor the backward. Reach for it when a bias can grow without bound while `q·k` cannot (a learned table has no ceiling the way a normalised dot product does), or to drive a clipping rule from the real maximum instead of from a bound. A row whose keys are all masked away reads `0.0`, the value the kernel substitutes for an empty row's `-inf`.
 
+### Backward preprocessing
+
+Backward computes `delta = sum(dO * O, dim=-1)` in fp32 before the query- and key-tile
+kernels. A row-reduction kernel loads the original tensors and reduces in registers,
+without materializing full fp32 casts or a full fp32 elementwise product. This does not
+change the attention definition, required gradients or asymptotic memory bound. Reduction
+order can differ from PyTorch's row sum; numerical agreement is tested within tolerance.
+
 ## Three primitives
 
 Every term is built from one of three primitives. They differ in which pairs they reach and where the value of a pair comes from.

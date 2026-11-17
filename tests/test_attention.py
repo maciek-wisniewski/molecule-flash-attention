@@ -354,3 +354,28 @@ def test_interpolated_table_register_reduction(device, monkeypatch):
             terms.distance_function(per_head, pos, grid=(1.0, 9.0)),
         ],
     )
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_head128_backward_with_large_and_small_tables(device, dtype):
+    b, h, n = (2, 4, 129) if CUDA else (2, 2, 17)
+    q, k, v = qkv(b, h, n, n, 128, dtype=dtype, device=device)
+    pos = torch.randn(b, n, 3, device=device) * 5
+    label = torch.randint(0, 7, (b, n), device=device)
+    index = torch.randint(-1, n, (b, n, 24), device=device)
+    values = torch.randn(b, n, 24, h, device=device, requires_grad=True)
+    distance_table = torch.randn(257, h, device=device).T.requires_grad_(True)
+    relation_table = torch.randn(7, h, device=device).T.requires_grad_(True)
+    pocket_table = torch.randn(3, h, device=device).T.requires_grad_(True)
+    key_mask = torch.rand(b, n, device=device) > 0.4
+    key_mask[-1] = False
+    check(
+        q, k, v, [values, distance_table, relation_table, pocket_table],
+        bias=[
+            terms.distance_buckets(distance_table, pos, max_distance=20.0),
+            mf.PairBias(label_distance, label, relation_table, torch_fn=label_distance_torch),
+            terms.same_label(pocket_table, label),
+            mf.EdgeBias(index, values),
+        ],
+        key_mask=key_mask,
+    )

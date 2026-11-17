@@ -1170,6 +1170,33 @@ def forward(
     return o, lse, mx
 
 
+if HAS_TRITON:
+
+    @triton.jit
+    def _delta_kernel(O, DO, DELTA, ROWS: tl.constexpr, D: tl.constexpr,
+                      BM: tl.constexpr, BD: tl.constexpr):
+        rows = tl.program_id(0) * BM + tl.arange(0, BM)
+        channels = tl.arange(0, BD)
+        offsets = rows[:, None] * D + channels[None, :]
+        valid = (rows[:, None] < ROWS) & (channels[None, :] < D)
+        o = tl.load(O + offsets, mask=valid, other=0.0).to(tl.float32)
+        do = tl.load(DO + offsets, mask=valid, other=0.0).to(tl.float32)
+        value = tl.sum(o * do, axis=1)
+        tl.store(DELTA + rows, value, mask=rows < ROWS)
+
+
+def _delta(o: torch.Tensor, do: torch.Tensor) -> torch.Tensor:
+    if not HAS_TRITON:
+        return (do.float() * o.float()).sum(-1)
+    delta = torch.empty(o.shape[:-1], device=o.device, dtype=torch.float32)
+    rows = delta.numel()
+    if rows:
+        _delta_kernel[(triton.cdiv(rows, 32),)](
+            o, do, delta, rows, o.shape[-1], 32, _next_pow2(o.shape[-1]), num_warps=4,
+        )
+    return delta
+
+
 def backward(
     st: Structure,
     q,
@@ -1190,7 +1217,7 @@ def backward(
     """Gradients for ``q, k, v`` and a dict of gradients for the term tensors."""
     varlen = st.varlen
     do = do.contiguous()
-    delta = (do.float() * o.float()).sum(-1)
+    delta = _delta(o, do)
     if varlen:
         delta = delta.transpose(0, 1).unsqueeze(0).contiguous()  # [1, H, T]
         batch = cu_q.numel() - 1
