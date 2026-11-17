@@ -154,3 +154,58 @@ def test_sampler_kernels_match_cpu_helpers_in_the_interpreter(device):
         GROUP=block_size, ROWS=32, CHANNELS=triton.next_power_of_2(8), num_warps=4,
     )
     torch.testing.assert_close(scaled, weighted_gradient(do, weights, block_size))
+
+
+@pytest.mark.parametrize(
+    "sampling",
+    [None, mf.BackwardSampling(0), mf.BackwardSampling(0.3, block_size=16, seed=27)],
+    ids=["default", "zero", "sampled"],
+)
+def test_cpu_fullgraph_plumbing_preserves_gradients_and_rng(device, sampling):
+    if device != "cpu":
+        pytest.skip("this checks custom-op plumbing, not CUDA code generation")
+    torch.manual_seed(72)
+    inputs = qkv(1, 2, 37, 37, 8, device=device)
+    do = torch.randn_like(inputs[0])
+
+    def operation(q, k, v):
+        return mf.attention(q, k, v, backward_sampling=sampling)
+
+    compiled = torch.compile(operation, backend="eager", fullgraph=True)
+    compiled(*inputs)
+    state = torch.get_rng_state().clone()
+    expected = operation(*inputs)
+    actual = compiled(*inputs)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    want = torch.autograd.grad(expected, inputs, do)
+    got = torch.autograd.grad(actual, inputs, do)
+    for a, b in zip(got, want, strict=True):
+        torch.testing.assert_close(a, b, atol=0, rtol=0)
+    assert torch.equal(torch.get_rng_state(), state)
+
+
+def test_sampled_packed_attention_matches_the_weighted_dense_oracle(device):
+    torch.manual_seed(78)
+    q, k, v = qkv(1, 2, 54, 52, 8, device=device, varlen=True)
+    cu_q = torch.tensor([0, 0, 19, 19, 54], dtype=torch.int32, device=device)
+    cu_k = torch.tensor([0, 7, 7, 24, 52], dtype=torch.int32, device=device)
+    qlabels = torch.arange(54, device=device) % 5
+    klabels = torch.arange(52, device=device) % 5
+    table = torch.randn(2, 5, device=device, requires_grad=True)
+    bias = mf.PairBias(
+        label_distance, table=table, q_features=qlabels, k_features=klabels,
+        torch_fn=label_distance_torch,
+    )
+    sampling = mf.BackwardSampling(0.3, block_size=128 if device == "cuda" else 16, seed=17)
+    output = mf.attention_varlen(
+        q, k, v, cu_q, cu_k, 35, 28, bias=bias, backward_sampling=sampling
+    )
+    reference = mf.reference.attention_varlen(q, k, v, cu_q, cu_k, bias=bias)
+    do = torch.randn_like(output)
+    weights = sample_weights(do, sampling, cu_q, 35)
+    weighted = weighted_gradient(do, weights, sampling.block_size, cu_q, 35)
+    got = torch.autograd.grad(output, [q, k, v, table], do, retain_graph=True)
+    expected = torch.autograd.grad(reference, [q, k, v, table], weighted)
+    torch.testing.assert_close(output, reference, atol=2e-4, rtol=2e-4)
+    for a, b in zip(got, expected, strict=True):
+        torch.testing.assert_close(a, b, atol=2e-4, rtol=2e-4)
