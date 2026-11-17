@@ -157,8 +157,8 @@ def sample_weights(
     blocks = (length + sampling.block_size - 1) // sampling.block_size
     if sampling.budget == 0:
         return torch.ones(batch, heads, blocks, device=do.device, dtype=torch.float32)
-    if blocks == 0:
-        return torch.empty(batch, heads, 0, device=do.device, dtype=torch.float32)
+    if blocks == 0 or batch == 0 or heads == 0:
+        return torch.empty(batch, heads, blocks, device=do.device, dtype=torch.float32)
     if do.is_cuda:
         energies = torch.empty(batch, heads, blocks, device=do.device, dtype=torch.float64)
         strides = list(view.stride())
