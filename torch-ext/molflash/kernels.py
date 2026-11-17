@@ -517,19 +517,13 @@ class _Source:
         if spec.kind is Kind.CODE:
             if spec.table_grad:
                 L(
-                    f"cmin{p} = tl.min(tl.where({m}, cs{p}, {spec.num_codes}))",
-                    f"cmax{p} = tl.max(tl.where({m}, cs{p}, -1))",
-                    f"if cmin{p} == cmax{p}:",
+                    f"hot{p} = tl.max(tl.where({m}, cs{p}, -1))",
+                    f"hot_grad{p} = tl.sum(tl.where({m} & (cs{p} == hot{p}), dval{p}, 0.0))",
+                    f"tl.atomic_add({base} + tl.maximum(hot{p}, 0) * {s_code}, hot_grad{p}, "
+                    f"mask=hot{p} >= 0, sem=SEM)",
+                    f"tl.atomic_add({base} + cs{p} * {s_code}, dval{p}, "
+                    f"mask=({m}) & (cs{p} != hot{p}), sem=SEM)",
                 )
-                with L.indent():
-                    L(
-                        f"total{p} = tl.sum(tl.where({m}, dval{p}, 0.0))",
-                        f"tl.atomic_add({base} + cmin{p} * {s_code}, total{p}, "
-                        f"mask=cmin{p} < {spec.num_codes}, sem=SEM)",
-                    )
-                L("else:")
-                with L.indent():
-                    L(f"tl.atomic_add({base} + cs{p} * {s_code}, dval{p}, mask={m}, sem=SEM)")
             return
         row = f"{base} + cs{p} * {s_code}" if spec.code_indexed else base
         if spec.table_grad:
