@@ -87,6 +87,12 @@ multipliers, affine parameters and feature gradients. Both gradient kernels skip
 discarded query tiles before evaluating pairs. Additional storage is linear: group
 scores/weights and a weighted output-gradient tensor, never a dense pair weight matrix.
 
+`budget=0.1` does not mean keeping 10% of groups or bounding parameter-gradient
+variance/error by 10%. It is a heuristic gradient-energy budget used to derive the
+expected kept count; the attention Jacobian and optimizer can amplify its effects.
+`block_size` controls sampling groups, not the underlying attention launch tile.
+Changing the sampling group size alone is not dense-kernel tile tuning.
+
 Keep probabilities are rounded upward to a 24-bit integer grid, sampled with uniform
 integers, and reweighted using that actual probability. Zero-score groups retain zero
 probability. This prevents a tiny floating probability from disagreeing with the random
@@ -98,7 +104,11 @@ This is the sampled-gradient method of
 [LazyFlash v1](https://arxiv.org/html/2610.31911v1), adapted to structural terms. The
 gradient estimator equals the dense gradient in expectation, subject to ordinary floating
 point rounding; individual backward calls differ. This does not imply identical optimizer
-updates, lower variance or unchanged training quality.
+updates, lower variance or unchanged training quality. Dense forward means the same
+output for the same weights; after sampled optimizer updates the weights and predictions
+can diverge from exact training. Evaluate wall-clock time to a fixed validation quality,
+not only backward latency or equal-step throughput. Sampling overhead and additional
+steps to reach that quality can outweigh kernel savings.
 
 `seed=None` consumes fresh numbers from the device's default PyTorch generator during
 backward. Set the ordinary training seed for reproducibility. An explicit nonnegative
