@@ -18,10 +18,12 @@ from .primitives import (
     PairScale,
     pair_function,
 )
+from .sampling import BackwardSampling
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "BackwardSampling",
     "EdgeBias",
     "EdgeMask",
     "NodeBias",
