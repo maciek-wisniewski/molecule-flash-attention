@@ -84,6 +84,9 @@ def test_varlen_weights_restart_at_sequence_boundaries_and_ignore_empty_segments
     torch.testing.assert_close(weighted, expected, atol=0, rtol=0)
 
 
+@pytest.mark.skipif(
+    torch.cuda.is_available(), reason="CPU interpreter; CUDA oracles run separately",
+)
 def test_all_input_sampled_gradients_with_checkpoint_on_cpu() -> None:
     from test_sampling_gpu_validation import verify_sampled_all_input_gradients
 
