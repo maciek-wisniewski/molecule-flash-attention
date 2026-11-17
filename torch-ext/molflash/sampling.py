@@ -15,6 +15,10 @@ except ImportError:  # pragma: no cover
     tl = None
 
 
+# Every cutoff on this integer grid is represented exactly by float32.
+_PROBABILITY_GRID = 2**24
+
+
 @dataclass(frozen=True)
 class BackwardSampling:
     budget: float
@@ -69,10 +73,9 @@ def block_probabilities(scores: torch.Tensor, budget: float) -> torch.Tensor:
         min=torch.finfo(torch.float64).tiny
     )
     multiplier = candidates.amax(dim=-1, keepdim=True)
-    probabilities = (normal * multiplier).clamp(max=1).float()
-    probabilities = torch.where(
-        positive, probabilities.clamp(min=torch.finfo(torch.float32).tiny), 0.0
-    )
+    cutoffs = ((normal * multiplier).clamp(max=1) * _PROBABILITY_GRID).ceil()
+    cutoffs = torch.where(positive, cutoffs.clamp(min=1), 0.0)
+    probabilities = (cutoffs / _PROBABILITY_GRID).float()
     return torch.where(finite, probabilities, torch.ones_like(probabilities))
 
 
@@ -185,8 +188,12 @@ def sample_weights(
     generator = None
     if sampling.seed is not None:
         generator = torch.Generator(device=do.device).manual_seed(sampling.seed)
-    draws = torch.rand(probabilities.shape, device=do.device, generator=generator)
-    return torch.where(draws < probabilities, probabilities.reciprocal(), 0.0)
+    draws = torch.randint(
+        _PROBABILITY_GRID, probabilities.shape, device=do.device, generator=generator
+    )
+    cutoffs = (probabilities * _PROBABILITY_GRID).to(torch.int64)
+    inverse = probabilities.clamp(min=1 / _PROBABILITY_GRID).reciprocal()
+    return torch.where(draws < cutoffs, inverse, 0.0)
 
 
 def weighted_gradient(

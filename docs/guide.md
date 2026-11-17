@@ -83,6 +83,13 @@ multipliers, affine parameters and feature gradients. Both gradient kernels skip
 discarded query tiles before evaluating pairs. Additional storage is linear: group
 scores/weights and a weighted output-gradient tensor, never a dense pair weight matrix.
 
+Keep probabilities are rounded upward to a 24-bit integer grid, sampled with uniform
+integers, and reweighted using that actual probability. Zero-score groups retain zero
+probability. This prevents a tiny floating probability from disagreeing with the random
+generator's finite resolution. Expected kept count increases by at most `groups / 2**24`;
+inverse weights are bounded by `2**24`. Group norms and budgeting use fp64 statistics
+without changing the attention matrix precision.
+
 This is the sampled-gradient method of
 [LazyFlash v1](https://arxiv.org/html/2610.31911v1), adapted to structural terms. The
 gradient estimator equals the dense gradient in expectation, subject to ordinary floating

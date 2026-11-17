@@ -131,6 +131,31 @@ def test_sampling_groups_must_cover_whole_backward_query_tiles(device):
         mf.attention(*inputs, backward_sampling=mf.BackwardSampling(0.1, block_size=1))
 
 
+def test_sampling_uses_the_actual_finite_grid_probability(monkeypatch):
+    grid = 2**24
+    scores = torch.tensor([[1e-30, 1.0, 2.0, 3.0]])
+    probabilities = block_probabilities(scores, 0.1)
+    assert probabilities[0, 0] == 1 / grid
+    assert torch.equal(probabilities * grid, (probabilities * grid).round())
+    assert 2 <= probabilities.sum() <= 2 + scores.numel() / grid
+    do = scores.reshape(1, 1, 4, 1)
+    config = mf.BackwardSampling(0.1, block_size=1, seed=8)
+
+    def draw(value):
+        def integer_draws(high, size, *, device, generator):
+            assert high == grid
+            return torch.full(size, value, device=device, dtype=torch.int64)
+        return integer_draws
+
+    monkeypatch.setattr(torch, "randint", draw(0))
+    kept = sample_weights(do, config)
+    assert kept[0, 0, 0] == grid
+    assert torch.isfinite(kept).all()
+    monkeypatch.setattr(torch, "randint", draw(1))
+    discarded = sample_weights(do, config)
+    assert discarded[0, 0, 0] == 0
+
+
 def test_sampler_kernels_match_cpu_helpers_in_the_interpreter(device):
     if device != "cpu":
         pytest.skip("this checks the CPU interpreter against independent torch arithmetic")
