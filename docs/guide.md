@@ -61,6 +61,44 @@ histogram updates; no contribution is discarded. Uniform-code tiles are fully re
 while mixed tiles can also avoid repeated updates to that selected bin. This requires no
 molecule-specific code values, dense pair cache or lower-precision accumulation.
 
+### Optional sampled backward
+
+`attention` and `attention_varlen` accept `backward_sampling=BackwardSampling(...)`.
+The default `None`, and a sampling budget of zero, use the original exact backward,
+consume no sampling random numbers and allocate no sampling buffers. Forward values and
+maximum-score diagnostics are unchanged for every sampling setting.
+
+`BackwardSampling(budget, block_size=128, seed=None)` is a frozen configuration. `budget`
+must be finite in `[0, 1)`; `block_size` must be a positive power of two and a multiple
+of the selected backward query tile. It defines query-row groups independently for each
+batch element and head. Packed sequences have separate groups, including their partial
+last group; groups never cross sequence boundaries.
+
+At backward time, each group's output-gradient norm supplies its score. The budget
+determines a desired kept-group count from the cumulative squared scores. Positive
+scores receive probabilities `min(1, lambda * score)` whose sum matches that count;
+kept groups carry inverse-probability weights. Zero-score groups need no work. One
+weighted output gradient drives Q/K/V and every learned term gradient, including gates,
+multipliers, affine parameters and feature gradients. Both gradient kernels skip
+discarded query tiles before evaluating pairs. Additional storage is linear: group
+scores/weights and a weighted output-gradient tensor, never a dense pair weight matrix.
+
+This is the sampled-gradient method of
+[LazyFlash v1](https://arxiv.org/html/2610.31911v1), adapted to structural terms. The
+gradient estimator equals the dense gradient in expectation, subject to ordinary floating
+point rounding; individual backward calls differ. This does not imply identical optimizer
+updates, lower variance or unchanged training quality.
+
+`seed=None` consumes fresh numbers from the device's default PyTorch generator during
+backward. Set the ordinary training seed for reproducibility. An explicit nonnegative
+63-bit seed repeats draws for the same group layout and is intended for controlled
+comparisons; callers must vary it to obtain independent repeated samples. Reusing a fixed
+seed throughout training does not establish conditional unbiasedness. Forward and activation
+checkpoint recomputation draw no sampling randomness. Higher-order gradients remain
+unsupported. `molflash.reference` remains the exact dense oracle and accepts no sampling
+configuration; compare a sampled backward against that oracle with the same weighted
+output gradient.
+
 ## Three primitives
 
 Every term is built from one of three primitives. They differ in which pairs they reach and where the value of a pair comes from.
