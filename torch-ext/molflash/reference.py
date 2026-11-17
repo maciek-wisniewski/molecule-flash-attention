@@ -114,6 +114,11 @@ def pair_dense(term: _PairTerm, b: int, h: int, nq: int, nk: int) -> torch.Tenso
 
 def edge_dense(term: EdgeBias | EdgeMask, b: int, h: int, nq: int, nk: int) -> torch.Tensor:
     idx = term.index.long()
+    if nk == 0:
+        if isinstance(term, EdgeMask):
+            return torch.zeros((b, 1, nq, 0), dtype=torch.bool, device=idx.device)
+        empty = term.values.new_zeros((b, h, nq, 0), dtype=torch.float32)
+        return empty + term.values[..., :0].sum()
     valid = (idx >= 0) & (idx < nk)
     safe = idx.clamp(0, nk - 1)
     if isinstance(term, EdgeMask):
