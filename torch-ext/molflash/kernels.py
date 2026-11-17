@@ -1297,7 +1297,7 @@ def backward(
         *tail,
         **ce,
         num_warps=warps,
-        num_stages=1,
+        num_stages=stages,
     )
     dq_k[(mt, batch * st.heads)](
         *common,
@@ -1307,7 +1307,7 @@ def backward(
         mt,
         **ce,
         num_warps=warps,
-        num_stages=1,
+        num_stages=stages,
     )
     for p, spec in enumerate(st.pairs):
         if ("priv", p) in grads:
