@@ -2,7 +2,7 @@ import torch
 
 from . import checks, kernels
 from ._ops import add_op_namespace_prefix
-from .plan import Structure, _listify, build_plan, collect_terms, lookup, register
+from .plan import _listify, build_plan, collect_terms, lookup, register
 from .sampling import BackwardSampling
 from .validation import check_call
 
@@ -219,9 +219,9 @@ def attention(
     if checking:
         checks.check_values(q, k, v, terms, key_mask)
     plan = build_plan(q, k, v, terms, key_mask, varlen=False)
-    sampling = _sampling_args(backward_sampling, plan.desc, q.device)
     _reject_transforms([q, k, v, *plan.tensors])
     key = register(plan.desc)
+    sampling = _sampling_args(backward_sampling, key, q.device)
     o, _, max_score = _fwd(q, k, v, plan.tensors, key, scale, None, None, 0, 0, *sampling)
     if checking:
         groups = {
@@ -268,9 +268,9 @@ def attention_varlen(
     if checks.enabled() and not torch.compiler.is_compiling():
         checks.check_values(q, k, v, terms, None, cu_q, cu_k)
     plan = build_plan(q, k, v, terms, None, varlen=True)
-    sampling = _sampling_args(backward_sampling, plan.desc, q.device)
     _reject_transforms([q, k, v, *plan.tensors])
     key = register(plan.desc)
+    sampling = _sampling_args(backward_sampling, key, q.device)
     o, _, max_score = _fwd(
         q, k, v, plan.tensors, key, scale, cu_q, cu_k, int(max_seqlen_q), int(max_seqlen_k),
         *sampling,
@@ -279,7 +279,7 @@ def attention_varlen(
 
 
 def _sampling_args(
-    sampling: BackwardSampling | None, desc: Structure, device: torch.device
+    sampling: BackwardSampling | None, key: int, device: torch.device
 ) -> tuple[float, int, int]:
     if sampling is None:
         return 0.0, 0, -1
@@ -287,6 +287,7 @@ def _sampling_args(
         raise TypeError("backward_sampling must be BackwardSampling or None")
     if sampling.budget == 0:
         return 0.0, 0, -1
-    sampling.validate_tile(kernels._blocks(desc, device, backward=True)[0])
+    structure = lookup(key)[0]
+    sampling.validate_tile(kernels._blocks(structure, device, backward=True)[0])
     seed = -1 if sampling.seed is None else sampling.seed
     return float(sampling.budget), sampling.block_size, seed

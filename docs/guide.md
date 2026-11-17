@@ -74,6 +74,10 @@ of the selected backward query tile. It defines query-row groups independently f
 batch element and head. Packed sequences have separate groups, including their partial
 last group; groups never cross sequence boundaries.
 
+Both public interfaces validate alignment against the registered kernel structure before
+forward. The CPU interpreter's smaller tiles do not certify a block size for CUDA;
+metadata tests also exercise the normal tile selector without launching attention kernels.
+
 At backward time, each group's output-gradient norm supplies its score. The budget
 determines a desired kept-group count from the cumulative squared scores. Positive
 scores receive probabilities `min(1, lambda * score)` whose sum matches that count;
