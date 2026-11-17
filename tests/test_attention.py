@@ -383,17 +383,16 @@ def test_head128_backward_with_large_and_small_tables(device, dtype):
 
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("uniform", [False, True])
-def test_large_code_table_gradient_for_uniform_and_mixed_tiles(device, dtype, uniform):
+@pytest.mark.parametrize("role", ["bias", "multiplier", "gate"])
+def test_large_code_table_gradient_for_uniform_and_mixed_tiles(device, dtype, uniform, role):
     b, h, n = 2, 2, 129 if CUDA else 37
     q, k, v = qkv(b, h, n, n, 16, dtype=dtype, device=device)
     positions = torch.arange(n, device=device).expand(b, n)
     label = positions // (32 if CUDA else 16) if uniform else positions % 7
-    table = torch.randn(257, h, device=device).T.requires_grad_(True)
+    table = (1.0 + 0.1 * torch.randn(257, h, device=device)).T.requires_grad_(True)
     mask = torch.ones(b, n, device=device, dtype=torch.bool)
     mask[0, -5:] = False
     mask[1] = False
-    check(
-        q, k, v, [table],
-        bias=mf.PairBias(label_distance, label, table, torch_fn=label_distance_torch),
-        key_mask=mask,
-    )
+    term_type = {"bias": mf.PairBias, "multiplier": mf.PairScale, "gate": mf.PairGate}[role]
+    term = term_type(label_distance, label, table, torch_fn=label_distance_torch)
+    check(q, k, v, [table], key_mask=mask, **{role: term})
