@@ -31,7 +31,9 @@ def verify_sampled_all_input_gradients(
     ]
     logit_scale = torch.ones(heads, device=device, requires_grad=True)
     bias_gate = torch.ones(heads, device=device, requires_grad=True)
-    inputs = [q, k, v, *tables, logit_scale, bias_gate, position_q, position_k]
+    node_q = torch.randn(rows, heads, queries, 3, device=device).requires_grad_()
+    node_k = torch.randn(rows, heads, keys, 3, device=device).requires_grad_()
+    inputs = [q, k, v, *tables, logit_scale, bias_gate, position_q, position_k, node_q, node_k]
     query_labels = torch.randint(0, 7, (rows, queries), device=device)
     key_labels = torch.randint(0, 7, (rows, keys), device=device)
     edge_index = torch.randint(-1, keys, (rows, queries, 5), device=device)
@@ -42,12 +44,13 @@ def verify_sampled_all_input_gradients(
     config = mf.BackwardSampling(budget=0.2, block_size=block_size, seed=632)
 
     def invoke(*args: torch.Tensor, reference: bool = False, sampled: bool = False) -> torch.Tensor:
-        query, key, value, distance, relation, bond, hop, pocket, scale, gate, pq, pk = args
+        (query, key, value, distance, relation, bond, hop, pocket, scale, gate, pq, pk, u, w) = args
         query = query * scale.to(query.dtype)[None, :, None, None]
         operation = mf.reference.attention if reference else mf.attention
         if reference:
             query, key, value = query.float(), key.float(), value.float()
         terms = [
+            mf.NodeBias(u, w),
             mf.terms.distance_function(
                 distance * gate[:, None], q_pos=pq, k_pos=pk, grid=(0.0, 8.0),
             ),
@@ -63,7 +66,18 @@ def verify_sampled_all_input_gradients(
             ),
         ]
         kwargs = {"backward_sampling": config} if sampled else {}
-        return operation(query, key, value, bias=terms, key_mask=key_mask, **kwargs)
+        return operation(
+            query, key, value, bias=terms, key_mask=key_mask,
+            multiplier=mf.PairScale(
+                label_distance, q_features=query_labels % 3, k_features=key_labels % 3,
+                table=1.0 + 0.1 * pocket, torch_fn=label_distance_torch,
+            ),
+            gate=mf.PairGate(
+                label_distance, q_features=query_labels, k_features=key_labels,
+                table=1.0 + 0.1 * relation, torch_fn=label_distance_torch,
+            ),
+            **kwargs,
+        )
 
     def sampled(*args: torch.Tensor) -> torch.Tensor:
         return invoke(*args, sampled=True)
