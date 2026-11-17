@@ -82,3 +82,9 @@ def test_varlen_weights_restart_at_sequence_boundaries_and_ignore_empty_segments
                 output_gradient[start + local] * weights[row, :, local // config.block_size, None]
             )
     torch.testing.assert_close(weighted, expected, atol=0, rtol=0)
+
+
+def test_all_input_sampled_gradients_with_checkpoint_on_cpu() -> None:
+    from test_sampling_gpu_validation import verify_sampled_all_input_gradients
+
+    verify_sampled_all_input_gradients(torch.float32, True, "cpu")
