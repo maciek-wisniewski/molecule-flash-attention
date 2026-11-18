@@ -120,6 +120,10 @@ unsupported. `molflash.reference` remains the exact dense oracle and accepts no 
 configuration; compare a sampled backward against that oracle with the same weighted
 output gradient.
 
+The [Integra A100 pilot](integra-a100-pilot.md) records scoped full-model timing and
+gradient-energy observations. It does not establish convergence speed or change the
+default exact backward.
+
 ## Three primitives
 
 Every term is built from one of three primitives. They differ in which pairs they reach and where the value of a pair comes from.

@@ -2,6 +2,10 @@
 
 Speed, memory and accuracy of `molflash.attention` against other ways of computing the same attention. Everything here is produced by `benchmarks/run.py` and formatted by `benchmarks/report.py`; the commands to reproduce each table are given with it.
 
+The separate [Integra A100 full-model pilot](integra-a100-pilot.md) measures optional
+sampled backward inside a fresh 235.65-million-parameter training model. Its optimizer-step
+timings are distinct from the standalone attention-layer tables below.
+
 ## What is compared
 
 Every method computes the same function from the same terms, except the last row of each table, which drops the bias and gives the speed limit.
