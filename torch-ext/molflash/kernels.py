@@ -10,6 +10,7 @@ import torch
 
 from .plan import PairSpec, Structure
 from .primitives import Kind, Role
+from .sampling import BackwardSampling, sample_weights, weighted_gradient
 
 try:
     import triton
@@ -516,7 +517,14 @@ class _Source:
             b_ptr = f"DB{p} + off_h * DB{p}_s0 + cs{p} * DB{p}_s1"
         if spec.kind is Kind.CODE:
             if spec.table_grad:
-                L(f"tl.atomic_add({base} + cs{p} * {s_code}, dval{p}, mask={m}, sem=SEM)")
+                L(
+                    f"hot{p} = tl.max(tl.where({m}, cs{p}, -1))",
+                    f"hot_grad{p} = tl.sum(tl.where({m} & (cs{p} == hot{p}), dval{p}, 0.0))",
+                    f"tl.atomic_add({base} + tl.maximum(hot{p}, 0) * {s_code}, hot_grad{p}, "
+                    f"mask=hot{p} >= 0, sem=SEM)",
+                    f"tl.atomic_add({base} + cs{p} * {s_code}, dval{p}, "
+                    f"mask=({m}) & (cs{p} != hot{p}), sem=SEM)",
+                )
             return
         row = f"{base} + cs{p} * {s_code}" if spec.code_indexed else base
         if spec.table_grad:
@@ -687,6 +695,7 @@ def _bwd_common_params(src: _Source) -> list[str]:
         + _tensor_params("DO", 4)
         + _tensor_params("LSE", 3)
         + _tensor_params("DELTA", 3)
+        + _tensor_params("SAMPLE", 3)
     )
 
 
@@ -698,7 +707,7 @@ def _gen_dkdv(src: _Source) -> str:
         + _tensor_params("DK", 4)
         + _tensor_params("DV_", 4)
         + src.term_params(grads=True)
-        + ["H", "NQ", "NK", "SCALE"]
+        + ["H", "NQ", "NK", "SCALE", "SAMPLED: tl.constexpr", "SAMPLE_BLOCK: tl.constexpr"]
     )
     has_gate = any(sp.role is Role.GATE for sp in st.pairs)
     has_mult = any(sp.role is Role.MULTIPLIER for sp in st.pairs)
@@ -729,6 +738,14 @@ def _gen_dkdv(src: _Source) -> str:
         src.hoist(L, o)
         L("for start_m in range(0, q_len, BM):")
         with L.indent():
+            L("sample_weight = 1.0", "if SAMPLED:")
+            with L.indent():
+                L(
+                    "sample_weight = tl.load(SAMPLE + off_b * SAMPLE_s0 + off_h * SAMPLE_s1 "
+                    "+ (start_m // SAMPLE_BLOCK) * SAMPLE_s2)"
+                )
+            L("if sample_weight != 0.0:")
+            L.depth += 1
             L(
                 "offs_m = start_m + tl.arange(0, BM)",
                 "m_valid = offs_m < q_len",
@@ -776,6 +793,7 @@ def _gen_dkdv(src: _Source) -> str:
                 src.feature_grads(L, o, p, spec, "k")
             if skip:
                 L.depth -= 1
+            L.depth -= 1
         L(
             "kv_mask = n_valid[:, None]",
             "tl.store(DK + off_b * DK_s0 + off_h * DK_s1 + k_tok[:, None] * DK_s2 + offs_dq[None, :] "
@@ -799,7 +817,7 @@ def _gen_dq(src: _Source) -> str:
         _bwd_common_params(src)
         + _tensor_params("DQ", 4)
         + src.term_params(grads=True)
-        + ["H", "NQ", "NK", "SCALE", "MT"]
+        + ["H", "NQ", "NK", "SCALE", "MT", "SAMPLED: tl.constexpr", "SAMPLE_BLOCK: tl.constexpr"]
     )
     has_gate = any(sp.role is Role.GATE for sp in st.pairs)
     has_mult = any(sp.role is Role.MULTIPLIER for sp in st.pairs)
@@ -829,6 +847,14 @@ def _gen_dq(src: _Source) -> str:
         src.feature_grad_init(L, "q", "BM")
         src.table_grad_init(L)
         src.hoist(L, o)
+        L("sample_weight = 1.0", "if SAMPLED:")
+        with L.indent():
+            L(
+                "sample_weight = tl.load(SAMPLE + off_b * SAMPLE_s0 + off_h * SAMPLE_s1 "
+                "+ (start_m * BM // SAMPLE_BLOCK) * SAMPLE_s2, mask=start_m * BM < q_len, other=0.0)"
+            )
+        L("if sample_weight != 0.0:")
+        L.depth += 1
         L("for start_n in range(0, k_len, BN):")
         with L.indent():
             L(
@@ -884,6 +910,7 @@ def _gen_dq(src: _Source) -> str:
                 src.feature_grads(L, o, p, spec, "q")
             if skip:
                 L.depth -= 1
+        L.depth -= 1
         L(
             "tl.store(DQ + off_b * DQ_s0 + off_h * DQ_s1 + q_tok[:, None] * DQ_s2 + offs_dq[None, :] "
             "* DQ_s3, (dq * SCALE).to(DQ.dtype.element_ty), mask=m_valid[:, None] "
@@ -1170,6 +1197,33 @@ def forward(
     return o, lse, mx
 
 
+if HAS_TRITON:
+
+    @triton.jit
+    def _delta_kernel(O, DO, DELTA, ROWS: tl.constexpr, D: tl.constexpr,
+                      BM: tl.constexpr, BD: tl.constexpr):
+        rows = tl.program_id(0) * BM + tl.arange(0, BM)
+        channels = tl.arange(0, BD)
+        offsets = rows[:, None] * D + channels[None, :]
+        valid = (rows[:, None] < ROWS) & (channels[None, :] < D)
+        o = tl.load(O + offsets, mask=valid, other=0.0).to(tl.float32)
+        do = tl.load(DO + offsets, mask=valid, other=0.0).to(tl.float32)
+        value = tl.sum(o * do, axis=1)
+        tl.store(DELTA + rows, value, mask=rows < ROWS)
+
+
+def _delta(o: torch.Tensor, do: torch.Tensor) -> torch.Tensor:
+    if not HAS_TRITON:
+        return (do.float() * o.float()).sum(-1)
+    delta = torch.empty(o.shape[:-1], device=o.device, dtype=torch.float32)
+    rows = delta.numel()
+    if rows:
+        _delta_kernel[(triton.cdiv(rows, 32),)](
+            o, do, delta, rows, o.shape[-1], 32, _next_pow2(o.shape[-1]), num_warps=4,
+        )
+    return delta
+
+
 def backward(
     st: Structure,
     q,
@@ -1186,11 +1240,20 @@ def backward(
     cu_k=None,
     max_q: int = 0,
     max_k: int = 0,
+    *,
+    backward_sampling: BackwardSampling | None = None,
 ):
     """Gradients for ``q, k, v`` and a dict of gradients for the term tensors."""
     varlen = st.varlen
     do = do.contiguous()
-    delta = (do.float() * o.float()).sum(-1)
+    weights = None
+    if backward_sampling is not None and backward_sampling.budget:
+        backward_sampling.validate_tile(_blocks(st, q.device, backward=True)[0])
+        weights = sample_weights(do, backward_sampling, cu_q if varlen else None, max_q)
+        do = weighted_gradient(
+            do, weights, backward_sampling.block_size, cu_q if varlen else None, max_q
+        )
+    delta = _delta(o, do)
     if varlen:
         delta = delta.transpose(0, 1).unsqueeze(0).contiguous()  # [1, H, T]
         batch = cu_q.numel() - 1
@@ -1258,10 +1321,15 @@ def backward(
         + _t_args(do4, 4, zb)
         + _t_args(lse, 3, zb)
         + _t_args(delta, 3, zb)
+        + _t_args(delta if weights is None else weights, 3)
     )
     term = launch.term_args(grads)
     tail = [st.heads, nq, nk, scale]
     ce = launch.constexpr(bm, bn)
+    ce.update(
+        SAMPLED=weights is not None,
+        SAMPLE_BLOCK=1 if weights is None else backward_sampling.block_size,
+    )
     dkdv_k[(triton.cdiv(max(nk, 1), bn), batch * st.heads)](
         *common,
         *_t_args(dk4, 4, zb),
@@ -1270,7 +1338,7 @@ def backward(
         *tail,
         **ce,
         num_warps=warps,
-        num_stages=1,
+        num_stages=stages,
     )
     dq_k[(mt, batch * st.heads)](
         *common,
@@ -1280,7 +1348,7 @@ def backward(
         mt,
         **ce,
         num_warps=warps,
-        num_stages=1,
+        num_stages=stages,
     )
     for p, spec in enumerate(st.pairs):
         if ("priv", p) in grads:

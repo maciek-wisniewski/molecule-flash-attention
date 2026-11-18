@@ -354,3 +354,45 @@ def test_interpolated_table_register_reduction(device, monkeypatch):
             terms.distance_function(per_head, pos, grid=(1.0, 9.0)),
         ],
     )
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_head128_backward_with_large_and_small_tables(device, dtype):
+    b, h, n = (2, 4, 129) if CUDA else (2, 2, 17)
+    q, k, v = qkv(b, h, n, n, 128, dtype=dtype, device=device)
+    pos = torch.randn(b, n, 3, device=device) * 5
+    label = torch.randint(0, 7, (b, n), device=device)
+    index = torch.randint(-1, n, (b, n, 24), device=device)
+    values = torch.randn(b, n, 24, h, device=device, requires_grad=True)
+    distance_table = torch.randn(257, h, device=device).T.requires_grad_(True)
+    relation_table = torch.randn(7, h, device=device).T.requires_grad_(True)
+    pocket_table = torch.randn(3, h, device=device).T.requires_grad_(True)
+    key_mask = torch.rand(b, n, device=device) > 0.4
+    key_mask[-1] = False
+    check(
+        q, k, v, [values, distance_table, relation_table, pocket_table],
+        bias=[
+            terms.distance_buckets(distance_table, pos, max_distance=20.0),
+            mf.PairBias(label_distance, label, relation_table, torch_fn=label_distance_torch),
+            terms.same_label(pocket_table, label),
+            mf.EdgeBias(index, values),
+        ],
+        key_mask=key_mask,
+    )
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("uniform", [False, True])
+@pytest.mark.parametrize("role", ["bias", "multiplier", "gate"])
+def test_large_code_table_gradient_for_uniform_and_mixed_tiles(device, dtype, uniform, role):
+    b, h, n = 2, 2, 129 if CUDA else 37
+    q, k, v = qkv(b, h, n, n, 16, dtype=dtype, device=device)
+    positions = torch.arange(n, device=device).expand(b, n)
+    label = positions // (32 if CUDA else 16) if uniform else positions % 7
+    table = (1.0 + 0.1 * torch.randn(257, h, device=device)).T.requires_grad_(True)
+    mask = torch.ones(b, n, device=device, dtype=torch.bool)
+    mask[0, -5:] = False
+    mask[1] = False
+    term_type = {"bias": mf.PairBias, "multiplier": mf.PairScale, "gate": mf.PairGate}[role]
+    term = term_type(label_distance, label, table, torch_fn=label_distance_torch)
+    check(q, k, v, [table], key_mask=mask, **{role: term})

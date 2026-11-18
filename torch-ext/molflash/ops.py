@@ -3,6 +3,7 @@ import torch
 from . import checks, kernels
 from ._ops import add_op_namespace_prefix
 from .plan import _listify, build_plan, collect_terms, lookup, register
+from .sampling import BackwardSampling
 from .validation import check_call
 
 
@@ -46,13 +47,17 @@ def _fwd(
     cu_k: torch.Tensor | None,
     max_q: int,
     max_k: int,
+    sampling_budget: float,
+    sampling_block: int,
+    sampling_seed: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     st, slots, pair_slots = lookup(key)
     return kernels.forward(st, q, k, v, tensors, slots, pair_slots, scale, cu_q, cu_k, max_q, max_k)
 
 
 @_fwd.register_fake
-def _(q, k, v, tensors, key, scale, cu_q, cu_k, max_q, max_k):
+def _(q, k, v, tensors, key, scale, cu_q, cu_k, max_q, max_k,
+      sampling_budget, sampling_block, sampling_seed):
     st = lookup(key)[0]
     if st.varlen:
         o = q.new_empty((q.shape[0], q.shape[1], v.shape[-1]))
@@ -65,7 +70,9 @@ def _(q, k, v, tensors, key, scale, cu_q, cu_k, max_q, max_k):
     return o, lse, mx
 
 
-@torch.library.custom_op(add_op_namespace_prefix("bwd"), mutates_args=())
+@torch.library.custom_op(
+    add_op_namespace_prefix("bwd"), mutates_args=(), tags=(torch.Tag.nondeterministic_seeded,)
+)
 def _bwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -80,16 +87,24 @@ def _bwd(
     cu_k: torch.Tensor | None,
     max_q: int,
     max_k: int,
+    sampling_budget: float,
+    sampling_block: int,
+    sampling_seed: int,
 ) -> list[torch.Tensor]:
     st, slots, pair_slots = lookup(key)
+    sampling = None if sampling_budget == 0 else BackwardSampling(
+        sampling_budget, sampling_block, None if sampling_seed < 0 else sampling_seed
+    )
     dq, dk, dv, grads = kernels.backward(
-        st, q, k, v, o, lse, do, tensors, slots, pair_slots, scale, cu_q, cu_k, max_q, max_k
+        st, q, k, v, o, lse, do, tensors, slots, pair_slots, scale, cu_q, cu_k, max_q, max_k,
+        backward_sampling=sampling,
     )
     return [dq, dk, dv, *_grads_for_tensors(st, slots, pair_slots, tensors, grads)]
 
 
 @_bwd.register_fake
-def _(q, k, v, o, lse, do, tensors, key, scale, cu_q, cu_k, max_q, max_k):
+def _(q, k, v, o, lse, do, tensors, key, scale, cu_q, cu_k, max_q, max_k,
+      sampling_budget, sampling_block, sampling_seed):
     st, slots, pair_slots = lookup(key)
     grads = [torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)]
     has_grad = set()
@@ -106,15 +121,23 @@ def _(q, k, v, o, lse, do, tensors, key, scale, cu_q, cu_k, max_q, max_k):
         has_grad |= {ps["q"][f] for f, n in enumerate(spec.q_feat_grad) if n}
         has_grad |= {ps["k"][f] for f, n in enumerate(spec.k_feat_grad) if n}
     for i, t in enumerate(tensors):
-        grads.append(torch.empty_like(t) if i in has_grad else t.new_empty(0, dtype=torch.float32))
+        if i not in has_grad:
+            gradient = t.new_empty(0, dtype=torch.float32)
+        elif st.edge_slots and i == slots["edge_values"]:
+            gradient = torch.empty_strided(
+                t.shape, t.stride(), dtype=torch.float32, device=t.device
+            ).to(t.dtype)
+        else:
+            gradient = t.new_empty(t.shape)
+        grads.append(gradient)
     return grads
 
 
 def _setup_context(ctx, inputs, output):
-    q, k, v, tensors, key, scale, cu_q, cu_k, max_q, max_k = inputs
+    q, k, v, tensors, key, scale, cu_q, cu_k, max_q, max_k, *sampling = inputs
     o, lse, mx = output
     ctx.save_for_backward(q, k, v, o, lse, *tensors)
-    ctx.meta = (key, scale, cu_q, cu_k, max_q, max_k)
+    ctx.meta = (key, scale, cu_q, cu_k, max_q, max_k, *sampling)
     ctx.mark_non_differentiable(lse, mx)
 
 
@@ -126,12 +149,12 @@ def _backward(ctx, do, _dlse, _dmax):
         raise NotImplementedError(
             f"molflash: the gradient of the gradient (create_graph=True) {_UNSUPPORTED}"
         )
-    key, scale, cu_q, cu_k, max_q, max_k = ctx.meta
+    key, scale, cu_q, cu_k, max_q, max_k, *sampling = ctx.meta
     q, k, v, o, lse, *tensors = ctx.saved_tensors
-    grads = _bwd(q, k, v, o, lse, do, tensors, key, scale, cu_q, cu_k, max_q, max_k)
+    grads = _bwd(q, k, v, o, lse, do, tensors, key, scale, cu_q, cu_k, max_q, max_k, *sampling)
     dq, dk, dv, *rest = grads
     rest = [g if g.shape == t.shape else None for g, t in zip(rest, tensors, strict=True)]
-    return dq, dk, dv, rest, None, None, None, None, None, None
+    return dq, dk, dv, rest, None, None, None, None, None, None, None, None, None
 
 
 torch.library.register_autograd(
@@ -168,6 +191,7 @@ def attention(
     key_mask: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     return_max_score: bool = False,
+    backward_sampling: BackwardSampling | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Attention with structural terms computed in the kernel.
 
@@ -185,6 +209,8 @@ def attention(
             one store per row and no arithmetic. There is no other way to see it,
             because a score tile never leaves the kernel. Rows with no key left read
             0.0. Not differentiable.
+        backward_sampling: optional query-block importance sampling in backward only.
+            ``None`` or budget zero preserves exact gradients and consumes no sampling RNG.
 
     Returns ``[B, H, Nq, Dv]``. Queries with no key left return zeros.
     """
@@ -197,7 +223,8 @@ def attention(
     plan = build_plan(q, k, v, terms, key_mask, varlen=False)
     _reject_transforms([q, k, v, *plan.tensors])
     key = register(plan.desc)
-    o, _, max_score = _fwd(q, k, v, plan.tensors, key, scale, None, None, 0, 0)
+    sampling = _sampling_args(backward_sampling, key, q.device)
+    o, _, max_score = _fwd(q, k, v, plan.tensors, key, scale, None, None, 0, 0, *sampling)
     if checking:
         groups = {
             n: _listify(g)
@@ -222,6 +249,7 @@ def attention_varlen(
     gate=None,
     softmax_scale: float | None = None,
     return_max_score: bool = False,
+    backward_sampling: BackwardSampling | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """:func:`attention` on sequences packed without padding.
 
@@ -244,7 +272,24 @@ def attention_varlen(
     plan = build_plan(q, k, v, terms, None, varlen=True)
     _reject_transforms([q, k, v, *plan.tensors])
     key = register(plan.desc)
+    sampling = _sampling_args(backward_sampling, key, q.device)
     o, _, max_score = _fwd(
-        q, k, v, plan.tensors, key, scale, cu_q, cu_k, int(max_seqlen_q), int(max_seqlen_k)
+        q, k, v, plan.tensors, key, scale, cu_q, cu_k, int(max_seqlen_q), int(max_seqlen_k),
+        *sampling,
     )
     return (o, max_score) if return_max_score else o
+
+
+def _sampling_args(
+    sampling: BackwardSampling | None, key: int, device: torch.device
+) -> tuple[float, int, int]:
+    if sampling is None:
+        return 0.0, 0, -1
+    if not isinstance(sampling, BackwardSampling):
+        raise TypeError("backward_sampling must be BackwardSampling or None")
+    if sampling.budget == 0:
+        return 0.0, 0, -1
+    structure = lookup(key)[0]
+    sampling.validate_tile(kernels._blocks(structure, device, backward=True)[0])
+    seed = -1 if sampling.seed is None else sampling.seed
+    return float(sampling.budget), sampling.block_size, seed

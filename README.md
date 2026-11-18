@@ -55,6 +55,11 @@ out = mf.attention(
 
 The same primitives act as masks (with skipping of empty tiles), multipliers on the logits and gates on the probabilities. Padded and packed variable-length batches, cross-attention, any head dimension up to 256, float16, bfloat16 and float32, and `torch.compile` are supported. `molflash.terms` has ready-made terms for the cases above, and [docs/recipes.md](docs/recipes.md#your-own-pair-function-in-triton) shows how to write your own.
 
+Exact backward remains the default. `backward_sampling=mf.BackwardSampling(budget=...)`
+opts into experimental query-block importance sampling while retaining the dense forward.
+This changes individual training gradients; see the
+[sampling contract](docs/guide.md#optional-sampled-backward) before enabling it.
+
 ## Speed and memory
 
 One attention layer, forward and backward, 8 heads of 64, bfloat16, on an A100 40 GB, for two sets of terms on the same coordinates: sequence offset + learned distance + 15 Å cutoff (`protein` in the benchmark scripts), and learned distance + bonds (`molecule`). Full tables, more baselines and the method are in [docs/benchmarks.md](docs/benchmarks.md).

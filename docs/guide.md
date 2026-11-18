@@ -47,6 +47,83 @@ It costs one store per query row and no arithmetic. That is `B·H·Nq` floats ag
 
 It is a diagnostic rather than a term: it carries no gradient, and asking for it changes neither the output nor the backward. Reach for it when a bias can grow without bound while `q·k` cannot (a learned table has no ceiling the way a normalised dot product does), or to drive a clipping rule from the real maximum instead of from a bound. A row whose keys are all masked away reads `0.0`, the value the kernel substitutes for an empty row's `-inf`.
 
+### Backward preprocessing
+
+Backward computes `delta = sum(dO * O, dim=-1)` in fp32 before the query- and key-tile
+kernels. A row-reduction kernel loads the original tensors and reduces in registers,
+without materializing full fp32 casts or a full fp32 elementwise product. This does not
+change the attention definition, required gradients or asymptotic memory bound. Reduction
+order can differ from PyTorch's row sum; numerical agreement is tested within tolerance.
+
+For discrete table gradients that use atomic histograms, the largest valid code in each
+tile is accumulated in fp32 before one atomic update. Other codes retain their ordinary
+histogram updates; no contribution is discarded. Uniform-code tiles are fully reduced,
+while mixed tiles can also avoid repeated updates to that selected bin. This requires no
+molecule-specific code values, dense pair cache or lower-precision accumulation.
+
+### Optional sampled backward
+
+`attention` and `attention_varlen` accept `backward_sampling=BackwardSampling(...)`.
+The default `None`, and a sampling budget of zero, use the original exact backward,
+consume no sampling random numbers and allocate no sampling buffers. Forward values and
+maximum-score diagnostics are unchanged for every sampling setting.
+
+`BackwardSampling(budget, block_size=128, seed=None)` is a frozen configuration. `budget`
+must be finite in `[0, 1)`; `block_size` must be a positive power of two and a multiple
+of the selected backward query tile. It defines query-row groups independently for each
+batch element and head. Packed sequences have separate groups, including their partial
+last group; groups never cross sequence boundaries.
+
+Both public interfaces validate alignment against the registered kernel structure before
+forward. The CPU interpreter's smaller tiles do not certify a block size for CUDA;
+metadata tests also exercise the normal tile selector without launching attention kernels.
+
+At backward time, each group's output-gradient norm supplies its score. The budget
+determines a desired kept-group count from the cumulative squared scores. Positive
+scores receive probabilities `min(1, lambda * score)` whose sum matches that count;
+kept groups carry inverse-probability weights. Zero-score groups need no work. One
+weighted output gradient drives Q/K/V and every learned term gradient, including gates,
+multipliers, affine parameters and feature gradients. Both gradient kernels skip
+discarded query tiles before evaluating pairs. Additional storage is linear: group
+scores/weights and a weighted output-gradient tensor, never a dense pair weight matrix.
+
+`budget=0.1` does not mean keeping 10% of groups or bounding parameter-gradient
+variance/error by 10%. It is a heuristic gradient-energy budget used to derive the
+expected kept count; the attention Jacobian and optimizer can amplify its effects.
+`block_size` controls sampling groups, not the underlying attention launch tile.
+Changing the sampling group size alone is not dense-kernel tile tuning.
+
+Keep probabilities are rounded upward to a 24-bit integer grid, sampled with uniform
+integers, and reweighted using that actual probability. Zero-score groups retain zero
+probability. This prevents a tiny floating probability from disagreeing with the random
+generator's finite resolution. Expected kept count increases by at most `groups / 2**24`;
+inverse weights are bounded by `2**24`. Group norms and budgeting use fp64 statistics
+without changing the attention matrix precision.
+
+This is the sampled-gradient method of
+[LazyFlash v1](https://arxiv.org/html/2610.31911v1), adapted to structural terms. The
+gradient estimator equals the dense gradient in expectation, subject to ordinary floating
+point rounding; individual backward calls differ. This does not imply identical optimizer
+updates, lower variance or unchanged training quality. Dense forward means the same
+output for the same weights; after sampled optimizer updates the weights and predictions
+can diverge from exact training. Evaluate wall-clock time to a fixed validation quality,
+not only backward latency or equal-step throughput. Sampling overhead and additional
+steps to reach that quality can outweigh kernel savings.
+
+`seed=None` consumes fresh numbers from the device's default PyTorch generator during
+backward. Set the ordinary training seed for reproducibility. An explicit nonnegative
+63-bit seed repeats draws for the same group layout and is intended for controlled
+comparisons; callers must vary it to obtain independent repeated samples. Reusing a fixed
+seed throughout training does not establish conditional unbiasedness. Forward and activation
+checkpoint recomputation draw no sampling randomness. Higher-order gradients remain
+unsupported. `molflash.reference` remains the exact dense oracle and accepts no sampling
+configuration; compare a sampled backward against that oracle with the same weighted
+output gradient.
+
+The [Integra A100 pilot](integra-a100-pilot.md) records scoped full-model timing and
+gradient-energy observations. It does not establish convergence speed or change the
+default exact backward.
+
 ## Three primitives
 
 Every term is built from one of three primitives. They differ in which pairs they reach and where the value of a pair comes from.
@@ -156,6 +233,13 @@ A gate multiplies probabilities after the softmax without renormalising. This is
 Table gradients are accumulated with atomics in one of three ways, chosen per call by table size: in registers for tables of up to 32 entries, in a private buffer per program for larger ones, or directly in the table when the private buffers would exceed 256 MB. Table gradients are only computed for tables that require grad, so a frozen table costs about half as much in the backward pass. The result is the same up to the order of floating-point additions, which makes table gradients not bitwise reproducible from run to run.
 
 The backward is differentiable once. Gradients of gradients (`create_graph=True`) and forward-mode AD are not implemented; see [Not supported yet](#not-supported-yet).
+
+The custom backward's fake metadata mirrors its real output buffers: Q/K/V gradients
+use PyTorch's preserved memory format, edge-value gradients retain their internal packed
+strides while accumulating in FP32, followed by conversion to the operand dtype;
+table, affine, node and floating-feature gradients are contiguous. This is
+the custom-op boundary used by `torch.compile`, not a requirement on a leaf Parameter's
+eventual `.grad` layout, which PyTorch's gradient accumulator controls.
 
 ## Batching: padding and varlen
 
