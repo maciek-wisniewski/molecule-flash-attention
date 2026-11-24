@@ -52,6 +52,13 @@ def attention_tangent(inputs, *, terms, key_mask, scale):
                 for value in inputs]
     q, k, v = primals
     dq, dk, dv = tangents
+    if q.shape[2] == 0:
+        # Keep the empty output differentiable with respect to every learned input.
+        weights = [term.values if isinstance(term, EdgeBias) else term.table for term in terms]
+        zero = sum(x[:0].sum() for x in (*primals, *tangents, *weights))
+        return zero.to(v.dtype).expand(*q.shape[:3], v.shape[-1])
+    if key_mask is not None and key_mask.dtype != torch.bool:
+        key_mask = key_mask.to(torch.int8).bool()
     outputs = []
     for start in range(0, q.shape[2], 32):
         block = partial(_tangent_block, start=start, terms=terms, key_mask=key_mask, scale=scale)
@@ -61,4 +68,4 @@ def attention_tangent(inputs, *, terms, key_mask, scale):
         else:
             out = block(*args)
         outputs.append(out)
-    return torch.cat(outputs, dim=2) if outputs else v[:, :, :0]
+    return torch.cat(outputs, dim=2)

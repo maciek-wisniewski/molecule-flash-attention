@@ -236,7 +236,9 @@ The fused backward is differentiable once. Padded `attention` also supports eage
 `torch.autograd.forward_ad` directions on any subset of Q, K and V, with an optional
 key mask, categorical `PairBias` and `EdgeBias`. Bias values can be learned and can
 receive gradients from a loss on the output tangent. No bias tangent is accepted.
-Inputs without a tangent use the regular fused path even inside a dual level.
+During eager execution, inputs without a tangent use the regular fused path even inside
+a dual level. Empty query or key axes yield zero tangents and zero gradients. Binary
+numeric key masks have the same effect as boolean masks.
 
 The primal remains the Triton kernel. The tangent uses PyTorch matrix operations
 in blocks of up to 32 queries, with the registered pair function evaluated by

@@ -67,3 +67,37 @@ def test_plain_inputs_inside_dual_level_and_zero_direction(device):
         strict=True,
     ):
         torch.testing.assert_close(got, want)
+
+
+@pytest.mark.parametrize(("nq", "nk"), [(0, 3), (3, 0), (0, 0)])
+def test_empty_axes_keep_zero_tangent_gradients(device, nq, nk):
+    q, k, v = qkv(1, 2, nq, nk, 16, 8, device=device)
+    directions = [torch.randn_like(x).requires_grad_() for x in (q, k, v)]
+    values = torch.randn(1, nq, 1, 2, device=device, requires_grad=True)
+    edge = mf.EdgeBias(torch.full((1, nq, 1), -1, device=device), values)
+    table = torch.randn(2, 7, device=device, requires_grad=True)
+    pair = mf.PairBias(signed_offset, q_features=torch.arange(nq, device=device)[None],
+                       k_features=torch.arange(nk, device=device)[None], table=table,
+                       torch_fn=signed_offset_torch)
+    with ad.dual_level():
+        duals = [ad.make_dual(x, d) for x, d in zip((q, k, v), directions, strict=True)]
+        out, tangent = ad.unpack_dual(mf.attention(*duals, bias=[pair, edge]))
+    ref = mf.reference.attention(q, k, v, bias=[pair, edge])
+    assert tangent is not None and tangent.shape == out.shape == (1, 2, nq, 8)
+    torch.testing.assert_close(out, ref)
+    assert tangent.count_nonzero() == 0
+    for grad in torch.autograd.grad(tangent.sum(), (q, k, v, *directions, table, values)):
+        assert grad.count_nonzero() == 0
+
+
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.int32, torch.float32])
+def test_legacy_numeric_key_mask_matches_boolean_jvp(device, dtype):
+    q, k, v = qkv(1, 1, 3, 4, 16, device=device)
+    keep = torch.tensor([[1, 0, 1, 0]], dtype=torch.bool, device=device)
+    direction = torch.randn_like(q)
+    with ad.dual_level():
+        dual = ad.make_dual(q, direction)
+        got = ad.unpack_dual(mf.attention(dual, k, v, key_mask=keep.to(dtype)))
+        want = ad.unpack_dual(mf.attention(dual, k, v, key_mask=keep))
+    for x, y in zip(got, want, strict=True):
+        torch.testing.assert_close(x, y)
