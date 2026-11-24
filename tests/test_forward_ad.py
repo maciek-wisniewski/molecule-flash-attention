@@ -12,11 +12,13 @@ def test_qkv_jvp_learned_joint_bias(device, loss):
     q, k, v = qkv(b, h, nq, nk, 16, 8, device=device)
     dq, dk, dv = (torch.randn_like(x).requires_grad_() for x in (q, k, v))
     w = torch.randn((h, 7, 4), device=device, requires_grad=True)
-    qi = torch.arange(nq, device=device).expand(b, -1)
+    rows = torch.arange(nq, device=device).expand(b, -1)
+    qi = rows % 7
     ki = torch.arange(nk, device=device).expand(b, -1)
-    targets = (qi + 2) % nk
+    targets = torch.full_like(qi, 3)
+    bond_type = (rows // 7) % 3 + 1
     rel = signed_offset_torch(qi, targets)
-    edge_values = (w[:, rel, 2] - w[:, rel, 0]).permute(1, 2, 0).unsqueeze(2)
+    edge_values = (w[:, rel, bond_type] - w[:, rel, 0]).permute(1, 2, 0).unsqueeze(2)
     edge = mf.EdgeBias(targets.unsqueeze(-1), edge_values)
     pair = mf.PairBias(signed_offset, q_features=qi, k_features=ki, table=w[..., 0])
     keep = ki < nk - 3
@@ -26,7 +28,9 @@ def test_qkv_jvp_learned_joint_bias(device, loss):
         out, tangent = ad.unpack_dual(mf.attention(*inputs, bias=[pair, edge], key_mask=keep))
 
     relation = signed_offset_torch(qi.unsqueeze(-1), ki.unsqueeze(-2))
-    bonds = (targets.unsqueeze(-1) == ki.unsqueeze(-2)).long() * 2
+    bonds = (targets.unsqueeze(-1) == ki.unsqueeze(-2)).long() * bond_type.unsqueeze(-1)
+    active_codes = (4 * relation + bonds)[keep.unsqueeze(1).expand_as(bonds)]
+    assert active_codes.unique().numel() == 7 * 4
     bias = w[:, relation, bonds].transpose(0, 1)
     def oracle(q, k, v):
         scores = (q @ k.transpose(-1, -2)) / 4 + bias

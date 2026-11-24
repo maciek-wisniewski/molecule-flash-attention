@@ -83,7 +83,7 @@ One attention layer, forward and backward, 8 heads of 64, bfloat16, on an A100 4
 pytest tests
 ```
 
-Every term and every gradient is compared with `molflash.reference`, a dense PyTorch implementation of the same function. Without a GPU the kernels run in Triton's interpreter, so the suite also runs on CPU, slowly and on small inputs.
+Every term and every gradient is compared with `molflash.reference`, a dense PyTorch implementation of the same function. Without a GPU the kernels run in Triton's interpreter, so the suite also runs on CPU, slowly and on small inputs. Use float32 or float16 for CPU interpreter kernels. For bfloat16 on CPU, use `molflash.reference.attention` or `molflash.reference.attention_varlen`, since the interpreter computes bfloat16 dot products incorrectly.
 
 ## Citing
 
