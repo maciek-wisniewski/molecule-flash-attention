@@ -232,7 +232,20 @@ A gate multiplies probabilities after the softmax without renormalising. This is
 
 Table gradients are accumulated with atomics in one of three ways, chosen per call by table size: in registers for tables of up to 32 entries, in a private buffer per program for larger ones, or directly in the table when the private buffers would exceed 256 MB. Table gradients are only computed for tables that require grad, so a frozen table costs about half as much in the backward pass. The result is the same up to the order of floating-point additions, which makes table gradients not bitwise reproducible from run to run.
 
-The backward is differentiable once. Gradients of gradients (`create_graph=True`) and forward-mode AD are not implemented; see [Not supported yet](#not-supported-yet).
+The fused backward is differentiable once. Padded `attention` also supports eager
+`torch.autograd.forward_ad` directions on any subset of Q, K and V, with an optional
+key mask, categorical `PairBias` and `EdgeBias`. Bias values can be learned and can
+receive gradients from a loss on the output tangent. No bias tangent is accepted.
+During eager execution, inputs without a tangent use the regular fused path even inside
+a dual level. Empty query or key axes yield zero tangents and zero gradients. Binary
+numeric key masks have the same effect as boolean masks.
+
+The primal remains the Triton kernel. The tangent uses PyTorch matrix operations
+in blocks of up to 32 queries, with the registered pair function evaluated by
+Triton. For probabilities `P`, the tangent is `dP @ V + P @ dV`, with
+`dP = P * (dS - sum(P * dS, keys))`. Reverse AD recomputes each block so score
+workspace scales as `O(B * H * min(32, Nq) * Nk)`. Arithmetic is quadratic for
+self-attention. This implementation makes no fused-JVP speed guarantee.
 
 The custom backward's fake metadata mirrors its real output buffers: Q/K/V gradients
 use PyTorch's preserved memory format, edge-value gradients retain their internal packed
@@ -287,7 +300,9 @@ or set `MOLFLASH_DEBUG=1`. Debug mode raises `molflash.MolflashDebugError` on ou
 
 ## Not supported yet
 
-- Forward-mode AD (`torch.func.jvp`, `torch.autograd.forward_ad`), `torch.vmap`, and gradients of gradients (`create_graph=True`). Each raises `NotImplementedError`. Without that check PyTorch would return a zero tangent for forward mode.
+- `torch.func` transforms (including `jvp` and `vmap`) and gradients of the fused backward.
+  Forward AD for packed varlen, sampled backward, compiled calls, structural
+  tangents, or term types outside the padded subset above is unsupported.
 - Pair representations updated layer by layer through non-linear operations, as in AlphaFold's Pairformer or Uni-Mol2. Such a model holds an `N × N × c` tensor anyway, so the kernel cannot remove that memory.
 - Pair values that cannot be computed from per-token inputs, such as shortest-path distances on a graph. Precompute them densely and use PyTorch SDPA.
 - AMD and Intel GPUs. Triton supports them, but the kernel is not tested there.

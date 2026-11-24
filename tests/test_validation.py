@@ -32,6 +32,20 @@ def test_layout_errors(inputs, device):
     )
 
 
+@pytest.mark.parametrize("varlen", [False, True])
+def test_cpu_interpreter_bfloat16(varlen, monkeypatch):
+    monkeypatch.setenv("TRITON_INTERPRET", "1")
+    shape = (2, 1, 16) if varlen else (1, 1, 2, 16)
+    x = torch.ones(shape, dtype=torch.bfloat16)
+    cu = torch.tensor([0, 2], dtype=torch.int32)
+    args = (x, x, x, cu, cu) if varlen else (x, x, x)
+    fused = mf.attention_varlen if varlen else mf.attention
+    reference = mf.reference.attention_varlen if varlen else mf.reference.attention
+    with pytest.raises(ValueError, match="bfloat16.*Triton CPU interpreter.*float32"):
+        fused(*args)
+    torch.testing.assert_close(reference(*args), x)
+
+
 def test_role_errors(inputs, device):
     pos = torch.randn(B, N, 3, device=device)
     _raises(
@@ -197,7 +211,8 @@ def test_unsupported_autograd_modes_raise(inputs, device):
     import torch.autograd.forward_ad as fwAD
 
     with fwAD.dual_level(), pytest.raises(NotImplementedError, match="forward-mode"):
-        mf.attention(fwAD.make_dual(q.detach(), torch.ones_like(q)), k, v)
+        node = mf.NodeBias(q, v)
+        mf.attention(fwAD.make_dual(q.detach(), torch.ones_like(q)), k, v, bias=node)
     o = mf.attention(q, k, v)
     with pytest.raises(NotImplementedError, match="create_graph"):
         torch.autograd.grad(o.sum(), q, create_graph=True)
