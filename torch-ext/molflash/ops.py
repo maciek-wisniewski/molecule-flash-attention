@@ -1,6 +1,6 @@
 import torch
 
-from . import checks, kernels
+from . import _jvp, checks, kernels
 from ._ops import add_op_namespace_prefix
 from .plan import _listify, build_plan, collect_terms, lookup, register
 from .sampling import BackwardSampling
@@ -162,7 +162,7 @@ torch.library.register_autograd(
 )
 
 
-def _reject_transforms(tensors) -> None:
+def _reject_transforms(tensors, *, allow_duals=False) -> None:
     """Without these checks torch.func.jvp and forward-mode AD return a zero tangent."""
     if torch.compiler.is_compiling():
         return
@@ -175,7 +175,7 @@ def _reject_transforms(tensors) -> None:
             raise NotImplementedError(
                 f"molflash: torch.func transforms (jvp, vmap, ...) {_UNSUPPORTED}"
             )
-        if torch.autograd.forward_ad.unpack_dual(t).tangent is not None:
+        if not allow_duals and torch.autograd.forward_ad.unpack_dual(t).tangent is not None:
             raise NotImplementedError(f"molflash: forward-mode AD {_UNSUPPORTED}")
 
 
@@ -221,9 +221,21 @@ def attention(
     if checking:
         checks.check_values(q, k, v, terms, key_mask)
     plan = build_plan(q, k, v, terms, key_mask, varlen=False)
-    _reject_transforms([q, k, v, *plan.tensors])
+    _reject_transforms(plan.tensors)
+    _reject_transforms((q, k, v), allow_duals=True)
+    inputs = None
+    if torch.autograd.forward_ad._current_level >= 0:
+        if torch.compiler.is_compiling():
+            raise NotImplementedError("molflash: forward-mode AD requires eager execution")
+        duals = [torch.autograd.forward_ad.unpack_dual(x) for x in (q, k, v)]
+        if any(x.tangent is not None for x in duals):
+            _jvp.check_terms(terms)
+            inputs = duals
+            q, k, v = (x.primal for x in inputs)
     key = register(plan.desc)
     sampling = _sampling_args(backward_sampling, key, q.device)
+    if inputs is not None and sampling[0]:
+        raise NotImplementedError("molflash: forward-mode AD requires exact backward")
     o, _, max_score = _fwd(q, k, v, plan.tensors, key, scale, None, None, 0, 0, *sampling)
     if checking:
         groups = {
@@ -231,6 +243,9 @@ def attention(
             for n, g in dict(bias=bias, mask=mask, multiplier=multiplier, gate=gate).items()
         }
         checks.compare_rows(o, q, k, v, groups, key_mask, scale)
+    if inputs is not None:
+        tangent = _jvp.attention_tangent(inputs, terms=terms, key_mask=key_mask, scale=scale)
+        o = torch.autograd.forward_ad.make_dual(o, tangent)
     return (o, max_score) if return_max_score else o
 
 

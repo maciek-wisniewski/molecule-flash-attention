@@ -197,7 +197,8 @@ def test_unsupported_autograd_modes_raise(inputs, device):
     import torch.autograd.forward_ad as fwAD
 
     with fwAD.dual_level(), pytest.raises(NotImplementedError, match="forward-mode"):
-        mf.attention(fwAD.make_dual(q.detach(), torch.ones_like(q)), k, v)
+        node = mf.NodeBias(q, v)
+        mf.attention(fwAD.make_dual(q.detach(), torch.ones_like(q)), k, v, bias=node)
     o = mf.attention(q, k, v)
     with pytest.raises(NotImplementedError, match="create_graph"):
         torch.autograd.grad(o.sum(), q, create_graph=True)

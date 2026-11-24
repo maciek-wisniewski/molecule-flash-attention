@@ -197,7 +197,13 @@ def attention(
         zero = torch.zeros_like(s[..., :1])
         max_score = torch.where(alive, s.max(dim=-1, keepdim=True).values, zero).squeeze(-1)
         max_score = max_score.expand(b, h, nq).contiguous()
-    p = torch.softmax(s, dim=-1)
+    # Native softmax's forward-AD rule can invalidate saved tensors during a
+    # subsequent backward through its tangent. Use differentiable primitives.
+    if nk:
+        exp = (s - s.amax(dim=-1, keepdim=True).detach()).exp()
+        p = exp / exp.sum(dim=-1, keepdim=True)
+    else:
+        p = s
     p = torch.where(keep, p, torch.zeros_like(p))
     for term in _listify(gate):
         p = p * dense_term(term, b, h, nq, nk)
