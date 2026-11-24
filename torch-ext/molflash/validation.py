@@ -36,11 +36,6 @@ def check_call(q, k, v, terms, *, key_mask, varlen: bool, cu_q=None, cu_k=None) 
             f"molflash.attention runs on CUDA, got tensors on {q.device}. "
             "molflash.reference.attention takes the same arguments and runs on CPU."
         )
-    if q.device.type == "cpu" and q.dtype == torch.bfloat16 and _interpreting():
-        _fail(
-            "bfloat16 dot products are unreliable in the Triton CPU interpreter. "
-            "Use float32 or molflash.reference.attention or attention_varlen on CPU."
-        )
     h_axis, n_axis = (1, 0) if varlen else (1, 2)
     if not (q.shape[h_axis] == k.shape[h_axis] == v.shape[h_axis]):
         _fail(

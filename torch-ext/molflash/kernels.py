@@ -1161,6 +1161,11 @@ def forward(
     max_q: int = 0,
     max_k: int = 0,
 ):
+    if q.device.type == "cpu" and q.dtype == torch.bfloat16 and _interpret():
+        raise ValueError(
+            "bfloat16 dot products are unreliable in the Triton CPU interpreter. "
+            "Use float32 or molflash.reference.attention or attention_varlen on CPU."
+        )
     fwd, _, _, _ = generated(st)
     varlen = st.varlen
     q4, k4, v4 = (_qkv4(x, varlen) for x in (q, k, v))
